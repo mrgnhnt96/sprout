@@ -24,7 +24,14 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// This is a registry, not a ceiling: a phase that adds an area adds its name
 /// here in the same change. `protocol` is Phase 2's, and the wire vocabulary
 /// of `snapshot` / `watch --since <cursor>` lives in it.
-const libraries = {'store', 'stream', 'policy', 'runner', 'protocol'};
+const libraries = {
+  'store',
+  'stream',
+  'policy',
+  'runner',
+  'protocol',
+  'snapshot',
+};
 
 /// Reads the resolved version of [package] out of `pubspec.lock`.
 ///

@@ -17,10 +17,14 @@ const pinnedExactly = {
 /// quietly loosened to `^`, exactly one of the two groups would fail.
 const caretRanged = {'args', 'path', 'test', 'lints'};
 
-/// The libraries every later Phase 1 leaf lands in. One top-level library per
-/// area, deliberately with no shared barrel, so the leaves cannot collide on a
+/// The libraries the leaves land in. One top-level library per area,
+/// deliberately with no shared barrel, so the leaves cannot collide on a
 /// single file.
-const libraries = {'store', 'stream', 'policy', 'runner'};
+///
+/// This is a registry, not a ceiling: a phase that adds an area adds its name
+/// here in the same change. `protocol` is Phase 2's, and the wire vocabulary
+/// of `snapshot` / `watch --since <cursor>` lives in it.
+const libraries = {'store', 'stream', 'policy', 'runner', 'protocol'};
 
 /// Reads the resolved version of [package] out of `pubspec.lock`.
 ///

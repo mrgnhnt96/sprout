@@ -1,0 +1,56 @@
+/// `snapshot` — the whole world, in one call, at one cursor.
+///
+/// A snapshot is the picture that `watch --since <cursor>` sends deltas
+/// against: *"an event saying `leaf.closed` is not a picture, it is a delta
+/// against one"* (`docs/01-plan.md` §7). The two join on the [Cursor], so
+/// everything in a snapshot has to be true at the *same* position — a
+/// consumer applies the deltas from there and must arrive at the present with
+/// no gap and no double-apply. How that is obtained over a store with no
+/// transaction seam, and which way it deliberately errs, is documented on
+/// [StoreSnapshotSource].
+///
+/// Start at [takeSnapshot]. It reads a [SnapshotSource] — [StoreSnapshotSource]
+/// in production — and returns a [SproutSnapshot] carrying every node with its
+/// depth, parent, status, `current_task`, `since` and `next_checkin`, the
+/// cumulative spend of every subtree, everything held with its holder, and the
+/// cursor it is all true at.
+///
+/// **Three fields survive any compression, and each is a rule about absence**
+/// (`docs/01-plan.md` §7):
+///
+/// - `next check-in` prints [noCheckinText] — `NONE SCHEDULED` — and never a
+///   blank, because absence must never look like presence. A blank column
+///   reads as "fine".
+/// - Every held resource appears **with its holder**: [HeldResource] refuses
+///   to exist without one, since a lock with no named holder is not
+///   information.
+/// - [SproutSnapshot.journalUnreadable] says so *in the snapshot* when the
+///   event feed could not be read. A snapshot that silently omitted what it
+///   could not read is exactly the INV8 failure this phase exists to prevent.
+///
+/// And **no age is ever estimated.** A node with no `since` renders
+/// `since ?` — not a guess, not `0`, not the process start time — because a
+/// guessed age is indistinguishable from a measured one downstream. The same
+/// [unknownValueText] stands in wherever else sprout genuinely does not know,
+/// including a subtree whose spend nobody reported: [SubtreeSpend] answers
+/// `spend ?` and never `$0.00`.
+///
+/// Implementation lives under `lib/src/snapshot/`.
+library;
+
+export 'src/snapshot/resource.dart'
+    show HeldResource, heldResourcesOf, isHoldingStatus, nothingHeldText;
+export 'src/snapshot/snapshot.dart'
+    show
+        SnapshotNode,
+        SproutSnapshot,
+        formatAge,
+        formatClock,
+        journalReadableText,
+        journalUnreadableKey,
+        noNodesText;
+export 'src/snapshot/source.dart' show SnapshotSource, StoreSnapshotSource;
+export 'src/snapshot/spend.dart'
+    show SubtreeSpend, noCheckinText, unknownValueText;
+export 'src/snapshot/take.dart'
+    show resultEventKind, takeSnapshot, totalCostUsdField;

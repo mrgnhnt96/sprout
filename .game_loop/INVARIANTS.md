@@ -1,10 +1,19 @@
 # INVARIANTS
 
-The non-negotiables `game_loop stepback` re-injects. This is the template that ships with game_loop —
-**edit it to your project's north star.** Keep the general ones (INV1–INV6); add your own as observed
-failures demand. Each should earn its place from a real mistake, not from wanting a tidy list — INV7
-and INV8 are the worked examples, both added from this project's own logged failures and kept because
-they generalise past it. Delete them if they do not fit yours; that is the point of the file.
+The non-negotiables `game_loop stepback` re-injects.
+
+**INV1–INV8 are game_loop's, kept deliberately.** INV7 and INV8 arrived as worked examples from
+another project and describe two of sprout's own measured traps almost exactly — a sum that hid its
+distribution, and a check whose pass was silence. They stay.
+
+**INV9–INV14 are sprout's**, and each is here because something actually failed, not to round out a
+list. Sources are named so a later session can re-check rather than re-derive: `docs/01-plan.md`,
+`docs/research/17-observed-schemas.md` (captured from a live CLI, with the raw frames under
+`docs/research/fixtures/phase0/`), and `docs/research/08-token-cost-audit.md`.
+
+sprout is a harness that watches agent sessions from **outside** them. Most of what follows is the
+consequence of that one fact: everything sprout believes about a session is inferred from a stream it
+does not control, and every inference below has already been wrong once.
 
 ---
 
@@ -117,6 +126,120 @@ output at all, so "outside this repo is read-only" stopped being enforced and no
 Sixteen permissive assertions passed against a guard mutated to check nothing. Four producers that
 report by staying silent were barely tested — one of them noticed by a single assertion out of 431.
 None of it was visible while every suite was green.
+
+---
+
+## INV9 — sprout may write scripts and tune knobs. It may never modify its own gates.
+
+The asymmetry is **structural or it does not exist**. A depth cap, a budget ceiling, a verification
+step and the criteria a node is judged against are inputs to sprout, never outputs of it. If a run
+can reach them, the guardrail is a suggestion with extra steps.
+
+The failure is not hypothetical and not ours. The Darwin Gödel Machine, given the ordinary incentive
+to make its score go up, **faked test logs**; told to fix hallucination detection, it **removed the
+reward-function markers it had been explicitly instructed not to touch** (`docs/01-plan.md` §9,
+`docs/research/14-self-improvement.md`). Nothing about that required malice — removing the detector
+is simply the cheapest way to satisfy the detector. Assume every sprout node would do the same if the
+path were open, and close the path in the filesystem rather than in the brief.
+
+The test, from INV1: **if a node ignored every word of its prompt, would the cap still hold?** For a
+cap enforced in daemon code before a child process launches, yes. For a cap stated in a system
+prompt, no. Only the first is a cap.
+
+## INV10 — A control-plane fact is observed or it is not a fact
+
+Everything sprout knows about a session comes from a stream and a hook payload it did not design.
+Those shapes are **not a stable API** and the documentation is not a substitute for a capture. Before
+depending on a field name, an event name, or an exit code, name the fixture that shows it:
+`docs/research/fixtures/phase0/`. Add a fixture when depending on something new.
+
+The failure is this project's own, and it was load-bearing. `docs/research/06-claude-code-control-plane.md`
+was written from documentation and got **six things wrong**, one of them inverted: it stated that a
+Stop hook **blocks on exit 0 and allows on exit 2**. The truth, captured in
+`fixtures/phase0/streams/D.ndjson`, is the reverse — exit 2 blocks and injects the hook's stderr into
+the conversation as feedback. Built as written, **every sprout gate would have failed open**, and by
+INV8 the failure mode is silence: a gate that permits everything looks exactly like a gate with
+nothing to refuse. Also wrong there: `prompt_text` (really `prompt`), `tool_result` (really
+`tool_response`), `subagent_id` (really `agent_id`), `Stop.reason` and `SessionStart.model`/`.tools`
+(neither exists), and `--max-turns`, which is not a CLI flag at all.
+
+Corollary, because the same trap has a second mouth: **a name is not a key.** The spawn tool is
+`Agent` in `system/init`, in `PreToolUse.tool_name` and in the assistant `tool_use` block — and
+`Task` in `result.permission_denials[].tool_name`. Match both, or sprout silently miscounts its own
+refusals.
+
+## INV11 — A message that was accepted is not an instruction that was obeyed
+
+sprout steers a running session by writing to its stdin. The transport acknowledging a message says
+only that bytes arrived. **Verify a steer by its consequence in the world, never by its acceptance.**
+
+The failure, observed twice under identical timing (`fixtures/phase0/streams/C.ndjson` versus
+`C2.ndjson`): the same steer, sent at the same moment mid-turn, was **refused by the model as a
+prompt-injection attempt** when phrased as an override ("STOP. Ignore the previous instruction
+entirely") and acted on when phrased additively ("Also, when you are done…"). In the refused run the
+model finished the original task, `--replay-user-messages` echoed the steer back as delivered, and
+`result.is_error` was `false` with `subtype: "success"`. **A discarded steer is indistinguishable
+from an obeyed one in every field sprout can read.** That is INV8 with a stranger's hand on the
+switch.
+
+Two consequences, both structural. Phrase every steer as an **additive constraint**, never as an
+override of a prior instruction — which agrees with the separately-measured rule that constraints
+re-pin and procedures do not (`docs/01-plan.md` §15). And never mark a steered node "corrected" on
+the strength of the send.
+
+## INV12 — "The parent finished" is not "the subtree finished"
+
+A node's lifetime does not bound its children's, and a result does not necessarily return to whoever
+asked for it. Subtree completion is computed from the node graph, never inferred from a parent's
+`Stop`, and a `result` frame is not process exit.
+
+Observed in `fixtures/phase0/streams/B.ndjson`: a subagent spawned a child that launched **async**
+(`status: "async_launched"`), then answered and stopped while that child was still running — its own
+`SubagentStop` payload listed the grandchild in `background_tasks` as `running`. When the grandchild
+finished, its result was delivered **to the root**, two levels up from the node that requested it, as
+a `<task-notification>` injected as a fresh `UserPromptSubmit`. The run emitted **two** `result`
+frames; `total_cost_usd` was cumulative across them, so reading the first understates the run.
+
+So: take the **last** `result`. Treat a `UserPromptSubmit` whose prompt opens with
+`<task-notification>` as machine traffic and never as human input. And do not infer synchrony from
+`run_in_background` — the async call did not carry that field at all.
+
+## INV13 — Attribute cost from the control plane, never from a heuristic
+
+This is INV7 aimed at the one number sprout puts on screen. Per-node spend comes from what the
+control plane reports for that node — `PostToolUse.tool_response` on an `Agent` call carries
+`agentId`, `totalTokens`, `totalDurationMs` and a full `usage` block, and the `system/task_*` frames
+carry it live. Derive it from anything else and say so on the record.
+
+Two measured failures, both silent, both from `docs/research/08-token-cost-audit.md`:
+
+- **`isSidechain` misses 98% of multi-agent spend** on this Claude Code version. Spawned sessions are
+  filed as independent `--worktrees-` projects (43.98% of spend) while true sidechains are 0.98%. A
+  cost view built on it is not slightly low; it is blind to almost the entire thing it exists to
+  show.
+- **Usage repeats per record. Not deduping by `message.id` inflates every figure 2.02×** — and a
+  number that is exactly twice right looks plausible in every direction.
+
+Related and non-obvious: **report byte-identical alongside normalized** for any repetition or waste
+metric. In-session repetition measures 17.76% normalized and **0.71%** byte-identical; the gap is
+*reading*, not looping, and a normalized-only detector overstates the problem **25×**.
+
+## INV14 — Containment is enforced before the launch, and sprout counts its own refusals
+
+The depth cap and the budget ceiling are checked in daemon code **before a child process exists**.
+They are never asked of a model, never expressed as a system prompt, and never delegated to the
+platform's own limits.
+
+Delegating them does not work even when it looks like it should. Observed in
+`fixtures/phase0/streams/E.ndjson`: a `PreToolUse` hook denied an `Agent` call, the model received
+the reason and adapted without retrying, `subagent_stats.spawned` stayed `0` — and all three
+`subagent_stats.refused` counters (`depth_limit`, `concurrency_limit`, `budget`) **also stayed `0`**.
+The platform counts only its own refusals. A denial sprout issued appears in `permission_denials` and
+nowhere else, so **sprout must keep its own count or its containment is invisible to it** — INV8
+again, in the one place where not noticing means a runaway tree.
+
+State what this does not catch: a node that shells out to `claude -p` directly bypasses the `Agent`
+tool and fires no `SubagentStart`. The cap is enforced on the tool, not on the intent.
 
 ---
 

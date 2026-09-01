@@ -57,3 +57,46 @@
 # it. Being unchecked NEVER blocks: this file ships empty, so "unlisted ⇒ refused" would refuse
 # your first commit with the fix sitting behind the gate. Want the strict version? Opt in with a
 # catch-all rule:  "*": ["<your test command>"].
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sprout's rules.
+#
+# Added because the P1-01 Crawler observed the failure this file's own COVERAGE
+# note predicts: an entire new Dart package was built, tested and committed with
+# the gate reporting clean, because nothing was listed. That is INV8 — a pass
+# that is silence proves nothing on its own.
+#
+# ON "GATE ON THE COMMAND CI RUNS": there is no CI here yet. The commands that
+# actually decide whether a change is good in this repo are showrunner's
+# integration checks, re-run on each MERGED result against the recorded
+# baseline. These three are those commands, byte for byte — see
+# .showrunner/config.json -> checks. If CI arrives later and diverges, this is
+# the file that has to move first.
+
+"sproutd/**":
+  - "cd sproutd && dart format --output=none --set-exit-if-changed ."
+  - "cd sproutd && dart analyze --fatal-infos --fatal-warnings"
+  - "cd sproutd && dart test"
+
+# Named exclusions, each a decision rather than an oversight.
+#
+#   docs/**, *.md   prose and captured research. The Phase 0 fixtures under
+#                   docs/research/fixtures/ are inert JSON — they are read by
+#                   sproutd's tests, and a change that breaks them fails under
+#                   the sproutd/** rule above, which is where it should fail.
+#   .game_loop/**   this harness's own rules and state. A gate that gates its
+#                   own gate file has no fixed point, and INV5 says a guard
+#                   must never block its own fix.
+#   .showrunner/**  campaign state and config, same reasoning.
+#   .claude/**      hook registration, read by Claude Code at session start and
+#                   not executable by any check here.
+#
+# NOT excluded, and deliberately so: sprout_ui/ does not exist yet (Phase 3).
+# When it lands it will be UNCHECKED and will say so on every commit that
+# touches it, which is the correct loud default until it has a real check.
+"unchecked-ok":
+  - "docs/**"
+  - "*.md"
+  - ".game_loop/**"
+  - ".showrunner/**"
+  - ".claude/**"

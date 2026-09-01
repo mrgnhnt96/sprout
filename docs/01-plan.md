@@ -301,8 +301,16 @@ questions: the stream envelope, `parent_tool_use_id` sufficiency (yes), the real
 and mid-run steering (works; phrasing is load-bearing). Six of `06`'s claims were wrong, including
 the Stop-hook exit code, which was inverted and would have made every gate fail open.
 
-**Phase 1 — daemon skeleton.** Revali + Zonai. Node graph, depth cap, budgets. `sprout run "<task>"`
-spawns exactly one session at depth 0 and streams its events to disk. No delegation yet.
+**Phase 1 — daemon skeleton. ✅ DONE** — `sproutd/`, 135 tests, six leaves built through showrunner
+in their own worktrees and integrated with checks green against a recorded baseline. Revali +
+`package:sqlite3` (not Zonai — §13). Store with a recursive-CTE tree and triggers making the event
+feed append-only in the schema; a stream parser that never throws on unknown input, deduping by
+frame `uuid` and rebuilding the agent tree from `parent_tool_use_id`; a containment policy with the
+depth cap and subtree budgets decided before a child process exists, counting its own refusals; a
+session runner that streams frames to a raw NDJSON log *and* the store. Verified on trunk, not just
+on branches: 7.4 MB binary, run from `/`, serving the snapshot on loopback with a WebSocket `101`
+and refusing both the LAN address and `::1`; `sprout run` spawned a real depth-0 session, and the
+store recorded 27 gapless events whose `UPDATE` the trigger refuses.
 
 **Phase 2 — observation.** `snapshot` + `watch --since <cursor>` with `ready`/`heartbeat`/`bye`.
 CLI consumer first; correctness of the protocol before any pixels.

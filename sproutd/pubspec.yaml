@@ -1,0 +1,24 @@
+name: sproutd
+description: >-
+  The sprout daemon. Orchestrates recursive Claude Code sessions and watches
+  them from outside, compiled to a single relocatable binary.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  args: ^2.7.0
+  path: ^1.9.1
+  # Pinned exactly: docs/01-plan.md §13 records these as the versions the
+  # single-binary pipeline was verified against, not merely as compatible.
+  revali_router: 5.1.1
+  sqlite3: 2.9.4
+
+dev_dependencies:
+  lints: ^6.0.0
+  # Pinned: the codegen CLI. Its dart_style pin is why sprout_ui must stay a
+  # separate package (docs/research/05-dart-stack.md, "Version conflicts").
+  revali: 3.3.2
+  test: ^1.25.0

@@ -31,6 +31,7 @@ const libraries = {
   'runner',
   'protocol',
   'snapshot',
+  'watch',
 };
 
 /// Reads the resolved version of [package] out of `pubspec.lock`.

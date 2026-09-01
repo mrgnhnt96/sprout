@@ -1,0 +1,7 @@
+merged showrunner/p1-01-sproutd-package-scaffold-a into main at 1788289355
+
+check format: rc=0 (0 failure line(s))
+check analyze: rc=3 (0 failure line(s))
+check tests: rc=0 (0 failure line(s))
+
+no baseline recorded — run `showrunner baseline` on a known-good tree first. Without one, 'no new failures' has nothing to be new *against*, and 'all green' is a criterion a real codebase cannot satisfy.

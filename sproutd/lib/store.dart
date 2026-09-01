@@ -8,3 +8,8 @@
 ///
 /// Implementation lives under `lib/src/store/`. See `docs/01-plan.md` §13.
 library;
+
+export 'src/store/event.dart' show SproutEvent;
+export 'src/store/node.dart' show NodeStatus, SproutNode, TreeNode;
+export 'src/store/schema.dart' show SchemaVersionError, currentSchemaVersion;
+export 'src/store/sprout_store.dart' show SproutStore, TreeIntegrityError;

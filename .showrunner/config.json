@@ -1,8 +1,16 @@
 {
   "checks": [
     {
-      "cmd": "echo 'configure me: your test command'",
-      "name": "tests"
+      "name": "format",
+      "cmd": "cd sproutd && dart format --output=none --set-exit-if-changed ."
+    },
+    {
+      "name": "analyze",
+      "cmd": "cd sproutd && dart analyze --fatal-infos --fatal-warnings"
+    },
+    {
+      "name": "tests",
+      "cmd": "cd sproutd && dart test"
     }
   ],
   "collision": {

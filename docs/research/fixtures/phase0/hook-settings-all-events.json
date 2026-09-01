@@ -1,0 +1,127 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh SessionStart",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh SessionEnd",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh UserPromptSubmit",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh PreToolUse",
+            "timeout": 15
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh PostToolUse",
+            "timeout": 15
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh SubagentStart",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh SubagentStop",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh Stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh Notification",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh PreCompact",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/private/tmp/claude-501/-Users-USER-Development-dart-sprout/20ea2a22-7b03-4df5-a823-d00f5a650c19/scratchpad/phase0/hookdump.sh PostCompact",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

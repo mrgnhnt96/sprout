@@ -1,0 +1,14 @@
+[  0.002s] >> SEND msg1: 'Run the Bash command `sleep 6` and then reply with the singl'
+[  1.167s] << system/init 
+[  2.937s] << user frame (replay?) Run the Bash command `sleep 6` and then reply with the single word FIRST.
+[  3.267s] << assistant tool_use: Bash {"command": "sleep 6", "description": "Sleep for 6 seconds"}
+[  5.009s] >> SEND msg2 (mid-run): 'Also, when you are done, create a file named steered.txt con'
+[  9.614s] << user frame (replay?) [{"tool_use_id": "toolu_01753Zi2RJJq26bYrY965tc1", "type": "tool_result", "content": "(Bas
+[  9.615s] << user frame (replay?) Also, when you are done, create a file named steered.txt containing the single word STEERE
+[ 11.548s] << assistant text: 'FIRST'
+[ 12.809s] << assistant tool_use: Write {"file_path": "/private/tmp/claude-501/-Users-USER-Development-da
+[ 13.022s] << user frame (replay?) [{"tool_use_id": "toolu_01QqEvwAfM5ewnhmNouqNWYq", "type": "tool_result", "content": "File
+[ 14.724s] << assistant text: 'Done. Created steered.txt with the content STEERED.'
+[ 14.935s] << result #1 origin=None result='Done. Created steered.txt with the content STEERED.' num_turns=3
+[ 95.048s] closing stdin after 1 result frame(s)
+[ 95.456s] exit code 0

@@ -129,16 +129,27 @@ performance win in the whole design and it consists of *not* building a tree.
      └────────────────────┘  └──────────────────┘
 ```
 
-**Control plane** (`06`, verified against installed CLI v2.1.252):
+**Control plane** (**`17-observed-schemas.md` — captured from a live CLI v2.1.252. `06` is superseded
+wherever the two disagree**):
 
 - Spawn: `claude -p --input-format stream-json --output-format stream-json`. sprout owns the pipe.
 - **Steer**: NDJSON on stdin — `{"type":"user","message":{"role":"user","content":"…"}}`. A message
   **queues and lands at the turn boundary**; it does not interrupt mid-turn. This independently
   matches LangGraph's conclusion that human input belongs at check-in boundaries, not as an
   interrupt (`02`).
+  Phrase every steer **additively** ("Also…", "One more constraint:…"). An override-shaped steer
+  ("STOP. Ignore the previous instruction") is refused by the model as prompt injection and the run
+  still reports `success` — observed, `17` §8.
 - Observe: the same stream, plus `--include-hook-events` and `--forward-subagent-text` (which sets
-  `parent_tool_use_id`, giving parent→child reconstruction from one stream).
-- Bound: `--max-turns`, `--max-budget-usd`, `--permission-mode acceptEdits`.
+  `parent_tool_use_id`, giving parent→child reconstruction from one stream — confirmed sufficient,
+  `17` §2). The `system/task_started` / `task_progress` / `task_updated` / `task_notification`
+  family carries `spawn_depth`, per-node token spend and current tool live; build Phase 2 on it.
+- Bound: `--max-budget-usd`, `--permission-mode acceptEdits`, and the env knobs
+  `CLAUDE_CODE_MAX_TURNS`, `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`,
+  `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. **`--max-turns` is not a CLI flag in v2.1.252** — it is
+  the env var only.
+- Gate: `PreToolUse` → `{"hookSpecificOutput":{"permissionDecision":"deny", …}}` at exit 0, and the
+  Stop gate at **exit 2** with the reason on stderr. `06` had these exit codes inverted.
 
 **Two observation paths, both needed.** stream-json is richer but only covers sessions sprout
 launched and owns the pipe for. A machine-wide hook config (`~/.claude/settings.json`) is the only
@@ -284,9 +295,11 @@ and `PostCompact`; showrunner owns neither.
 
 Each phase ends at something demonstrable.
 
-**Phase 0 — ground truth.** Capture real hook payloads and real `stream-json` frames from a live
-`claude -p` run; write the observed schemas down. `06`'s hook table is partly unverified and field
-names must be confirmed empirically before anything is built on them.
+**Phase 0 — ground truth. ✅ DONE** — `docs/research/17-observed-schemas.md`, with raw captures under
+`docs/research/fixtures/phase0/`. Six probes against live CLI v2.1.252 ($0.34) settled all four
+questions: the stream envelope, `parent_tool_use_id` sufficiency (yes), the real hook field names,
+and mid-run steering (works; phrasing is load-bearing). Six of `06`'s claims were wrong, including
+the Stop-hook exit code, which was inverted and would have made every gate fail open.
 
 **Phase 1 — daemon skeleton.** Revali + Zonai. Node graph, depth cap, budgets. `sprout run "<task>"`
 spawns exactly one session at depth 0 and streams its events to disk. No delegation yet.
@@ -314,7 +327,9 @@ start-time-verified pid, every quiet exit logged with a `why`.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Hook payload field names in `06` partly unverified | high | medium | Phase 0 exists precisely for this |
+| ~~Hook payload field names in `06` partly unverified~~ | ~~high~~ | ~~medium~~ | **Retired.** Phase 0 captured them; `17` is the source of truth |
+| A steer is silently ignored — accepted by the transport, refused by the model as injection | medium | medium | Phrase additively; verify by consequence, never by acceptance (`17` §8) |
+| A subagent outlives its parent and reports to the *grandparent* | *certain* | medium | Subtree completion computed from `task_updated`/`task_notification`, never from "parent finished" (`17` §6) |
 | Depth-3 containment unmeasured (4.4× is a depth-1 number; 4.4³≈85× is naive but nobody knows) | high | high | Depth 3 ceiling; per-hop deterministic gates; sprout could produce the first real depth ablation |
 | Critic false positives correlated across depth (parent and child share a model and its misconceptions) | medium | high | Deterministic verification; never same model as generator and verifier |
 | Build-mode fan-out producing non-composing artifacts | medium | high | Default build mode; push decisions down in the brief; narrow fan-out |

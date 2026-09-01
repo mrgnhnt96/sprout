@@ -1,5 +1,24 @@
 # Claude Code control plane — research notes
 
+> ## ⚠️ SUPERSEDED — do not build against this file
+>
+> This document was written from **documentation, not observation**, and Phase 0 found **six of its
+> claims wrong**, one of them inverted in a way that would have made every sprout gate fail open
+> (it says a Stop hook blocks on exit 0 and allows on exit 2; the truth is the reverse).
+>
+> **Use `17-observed-schemas.md`**, which was captured from a live CLI v2.1.252 with the raw frames
+> committed under `fixtures/phase0/`. Where the two disagree, `17` is right by construction.
+>
+> Known-wrong here: `UserPromptSubmit.prompt_text` (really `prompt`); `PostToolUse.tool_result`
+> (really `tool_response`); `SubagentStart.subagent_id` + `parent_tool_use_id` (really `agent_id`,
+> and no parent field at all); `Stop.reason` (does not exist); `SessionStart.model`/`.tools` (do not
+> exist); the Stop-hook exit codes. Also missing entirely: the whole `system/task_*` frame family,
+> which is the best observation surface the control plane has.
+>
+> This file is kept because §A (spawn flags) and §D (limits) are broadly sound, and because the
+> handoff's warning to "treat this document with more suspicion than the others" was correct and is
+> worth preserving as a record.
+
 **Sources:** https://code.claude.com/docs/en/cli-reference.md, https://code.claude.com/docs/en/hooks.md, https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode.md, https://code.claude.com/docs/en/headless.md, https://code.claude.com/docs/en/permission-modes.md
 
 **Confidence:** Official documentation v2.1.246+, v2.1.252+ CLI, Agent SDK Python v0.2.140+, TypeScript v0.3.234+

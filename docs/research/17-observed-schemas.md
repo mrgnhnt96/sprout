@@ -199,12 +199,23 @@ five-hour and seven-day windows a tree has burned.
    `origin: {"kind": "task-notification"}` — it is the root waking up to a background child that
    finished after the root had already answered. `total_cost_usd` is cumulative across them
    (`0.2317` → `0.2416`), so sprout must take the **last** `result`, not the first, and must not
-   treat the first as process exit. Frames with `origin: null` are the normal end of a user turn.
+   treat the first as process exit.
 
-2. **`permission_denials[].tool_name` is `"Task"` while everywhere else the same tool is `"Agent"`.**
-   In E, `system/init.tools` lists `Agent`, the `PreToolUse` payload says `tool_name: "Agent"`, the
-   assistant `tool_use` block says `name: "Agent"` — and the denial record says `"Task"`. Match on
-   both spellings or sprout will silently miscount its own refusals.
+   > **Correction (P1-03).** The normal end of a user turn has **no `origin` key at all** — it is
+   > absent, not present-and-null. Verified across all six fixtures: every single-result capture and
+   > B's first result omit the key entirely. A parser that reads `origin` as a nullable field and
+   > tests it for `null` will misread every normal turn end, because the distinction it needs is
+   > *key present* versus *key absent*.
+
+2. **The spawn tool has two spellings and neither is dominant.** `PreToolUse.tool_name` and the
+   assistant `tool_use` block say `"Agent"`; `result.permission_denials[].tool_name` says `"Task"`.
+   Match on both or sprout will silently miscount its own refusals.
+
+   > **Correction (P1-03).** This section originally claimed `system/init.tools` lists `Agent`. It
+   > does not. **All six captures list `Task` in `init.tools` and none lists `Agent`** — checked
+   > across every fixture, not just E. That makes matching both spellings *more* necessary than the
+   > original argued, not less: there is no single surface where the tool has one name. It is now a
+   > test in `sproutd/lib/src/stream/`.
 
 `subagent_stats` is a gift for the UI and for Phase 4's budget logic:
 

@@ -28,7 +28,24 @@ Two caveats that will bite on day one, both verified and both with clean workaro
 
 ## Revali
 
-`revali` **3.3.2** (dev-dependency, the codegen CLI) · `revali_router` **5.1.1** (the *only* runtime dependency) · `revali_server` 2.4.1. First 1.0 in Nov 2024, 31 releases, last 2026-08-17. Mature by the standards of this list.
+`revali` **3.3.2** (dev-dependency, the codegen CLI) · `revali_router` **5.1.1** (the *only* runtime
+dependency). First 1.0 in Nov 2024, 31 releases, last 2026-08-17. Mature by the standards of this list.
+
+> **Correction (Phase 1, verified by building it).** This section originally also pinned
+> `revali_server` 2.4.1 as a third dependency. **That is wrong, and the three pins are mutually
+> exclusive** — `dart pub get` refuses: the published `revali_server >=2.4.0` requires
+> `revali_router ^3.4.0`, while `revali` 3.3.2 requires `^5.1.0`.
+>
+> `revali_server` is **not a dependency at all** in revali 3.x. It is a *built-in construct*,
+> hardcoded and resolved from `package:revali/` itself —
+> `~/.pub-cache/hosted/pub.dev/revali-3.3.2/lib/handlers/constructs_handler.dart` returns
+> `ConstructConfig(name: 'revali_server', path: 'server/server.dart', isServer: true)` against the
+> `revali` package. The standalone pub.dev package is the pre-3.0 *external* construct, now
+> superseded. `@App`/`@Controller` arrive transitively via `revali_annotations`.
+>
+> **Depend on `revali_router` + `revali_annotations`; `dart run revali build` supplies the server
+> construct.** Verified: with `revali_server` dropped, `revali 3.3.2` + `revali_router 5.1.1` +
+> `sqlite3 2.9.4` resolve exactly and `pubspec.lock` is committed at `sproutd/`.
 
 ### Programming model
 

@@ -1,10 +1,41 @@
 /// Spawning and owning a `claude -p` session process.
 ///
-/// Launches the session with sprout holding both ends of the pipe
-/// (`--input-format stream-json --output-format stream-json`), applies the
-/// bounds `policy.dart` decided, streams frames to disk and into the store, and
-/// reports the process's real ending. A live pid is not evidence of progress,
-/// so liveness is three-valued: live, stalled, abandoned.
+/// Consults `policy.dart` before the launch, starts the process with stdin
+/// at EOF, and streams what it writes — to a raw NDJSON file on disk first,
+/// then through `stream.dart`'s parser into `store.dart`, one frame at a time
+/// while the process runs. The exact invocation is [claudeArguments], every
+/// flag verified against `docs/research/17-observed-schemas.md` §9.
+///
+/// Two things this library refuses to conclude. It does not infer completion
+/// from process exit: [EndedSession] reports what the stream said, and a run
+/// emits more than one `result` (INV12). And it does not lose the frames
+/// before a truncated last line: a process killed mid-write ends in a
+/// `MalformedFrame` that is stored like any other.
+///
+/// The process is behind [SessionLauncher] so the suite replays captured
+/// fixtures instead of spending money; [ClaudeLauncher] is the real one.
+/// Streaming input into a live session is Phase 7. Liveness — live, stalled,
+/// abandoned — is Phase 6.
 ///
 /// Implementation lives under `lib/src/runner/`. See `docs/01-plan.md` §5.
 library;
+
+export 'src/runner/launcher.dart'
+    show
+        ClaudeLauncher,
+        SessionLauncher,
+        SessionLaunch,
+        SessionProcess,
+        claudeArguments;
+export 'src/runner/projection.dart' show StoreProjection, frameKindPrefix;
+export 'src/runner/raw_log.dart' show RawLog;
+export 'src/runner/session_runner.dart'
+    show
+        EndedSession,
+        LiveSession,
+        RefusedSession,
+        SessionOutcome,
+        SessionRequest,
+        SessionRunner,
+        SessionStart,
+        rootBudgetUsd;

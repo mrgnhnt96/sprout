@@ -1,12 +1,14 @@
 /// The `sprout` command line — and, since P4-01, the daemon as well.
 ///
-/// Four verbs:
+/// Six verbs:
 ///
 /// ```
 /// sprout run "<task>"
 /// sprout snapshot [--json]
 /// sprout watch [--since <cursor>] [--json]
 /// sprout ui
+/// sprout hook
+/// sprout hooks install [--write <path>] [--command <line>]
 /// ```
 ///
 /// **This file is the whole product.** `dart compile exe bin/sprout.dart`
@@ -35,8 +37,19 @@
 /// the daemon's socket mints against the same database, and the two surfaces
 /// join.
 ///
+/// `hook` and `hooks install` are Phase 8's **second observation path**
+/// (`docs/01-plan.md` §4) and the only way sprout sees a session a developer
+/// started by hand in a terminal, which is the ordinary case. `hook` is not run
+/// by a person: Claude Code runs it on every hook event of every session, one
+/// OS process per event, with the payload on stdin. It is the only verb here
+/// that must never fail — see [HookCommand] for the three properties that
+/// follow from that and the mechanisms behind them.
+///
 /// The CLI writes the same SQLite file the daemon reads (WAL mode, so both
-/// can be open at once), and it honours the same `SPROUT_DB` variable.
+/// can be open at once), and it honours the same `SPROUT_DB` variable. Since
+/// `hook` made that several processes rather than two, `SproutStore.open` is
+/// also safe to call concurrently against a database that does not exist yet —
+/// see `migrate` in `lib/src/store/schema.dart`, which it was not.
 library;
 
 import 'dart:async';
@@ -45,6 +58,7 @@ import 'dart:io';
 
 import 'package:args/command_runner.dart';
 import 'package:path/path.dart' as p;
+import 'package:sproutd/hooks.dart';
 import 'package:sproutd/policy.dart';
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/runner.dart';
@@ -195,11 +209,14 @@ Future<void> main(List<String> arguments) async {
 ///
 /// [out] and [err] default to the process's; a test passes buffers.
 /// [environment] defaults to the process's and supplies `SPROUT_DB`.
+/// [input] is the payload `sprout hook` reads and defaults to the process's
+/// stdin; no other verb touches it.
 Future<int> sprout(
   List<String> arguments, {
   StringSink? out,
   StringSink? err,
   Map<String, String>? environment,
+  Stream<List<int>>? input,
 }) async {
   final stdoutSink = out ?? stdout;
   final stderrSink = err ?? stderr;
@@ -219,16 +236,35 @@ Future<int> sprout(
         ..addCommand(
           WatchCommand(out: stdoutSink, err: stderrSink, environment: env),
         )
+        // No `out:`. See [HookCommand] — stdout is an input channel on the
+        // hook surface, and the verb having no sink is what makes that a
+        // property of the code rather than a rule someone has to remember.
+        ..addCommand(
+          HookCommand(err: stderrSink, environment: env, input: input ?? stdin),
+        )
+        ..addCommand(HooksCommand(out: stdoutSink, err: stderrSink))
         // No `environment:`, and that is the point of the comment on
         // [UiCommand.run]: this verb starts a server that reads the process's
         // own environment, so an injected map would make it print a URL and a
         // database the server it just started does not use.
         ..addCommand(UiCommand(out: stdoutSink, err: stderrSink));
+  // The clamp, and it lives outside the command on purpose. [HookCommand.run]
+  // returns [exitOk] on every failure it can see, but two exits it cannot: a
+  // usage error, which `CommandRunner` raises before `run` is ever called, and
+  // anything thrown past it, which would leave the VM with a non-zero status.
+  // On this verb both are gates — a non-zero `PreToolUse` denies the tool call
+  // and a `2` from `Stop` traps the model in a loop (`17` §7) — so the code is
+  // forced here, where nothing inside the command can undo it.
+  final isHook = arguments.isNotEmpty && arguments.first == hookVerbName;
   try {
     return await runner.run(arguments) ?? exitOk;
   } on UsageException catch (error) {
     stderrSink.writeln(error);
-    return exitUsage;
+    return isHook ? exitOk : exitUsage;
+  } on Object catch (error, stack) {
+    if (!isHook) rethrow;
+    stderrSink.writeln('sprout hook: $error\n$stack');
+    return exitOk;
   }
 }
 
@@ -1041,3 +1077,364 @@ String renderFrame(ProtocolFrame frame) => switch (frame) {
     for (final node in blind) '  BLIND | ${node.nodeId} | ${node.because}',
   ].join('\n'),
 };
+
+/// The deadline `sprout hook` gives its whole run when none is set.
+///
+/// **The inner of two bounds, and it has to be the shorter one.** The settings
+/// block writes `timeout: $hookSettingsTimeoutSeconds` for Claude Code's own
+/// kill, and a hook killed from outside leaves nothing on stderr and no idea
+/// which step it was on; sprout giving up first produces a diagnostic and an
+/// honest exit 0.
+///
+/// Longer than `SproutStore.busyTimeoutMillis`, which is the point at the other
+/// end: a hook process that is *waiting its turn* on a database the daemon is
+/// writing is working correctly, and a deadline shorter than that wait would
+/// turn ordinary contention — the thing P8-02's `busy_timeout` exists to
+/// absorb — into a lost record. Five seconds of waiting fits inside eight.
+///
+/// A knob, not a finding. Nothing measured fixes eight seconds; it is the
+/// interval that leaves room for the busy wait and still expires before the
+/// settings timeout.
+const Duration defaultHookDeadline = Duration(seconds: 8);
+
+/// The option overriding [defaultHookDeadline], in milliseconds.
+const String hookDeadlineOption = 'deadline-ms';
+
+/// `sprout hook` — reads one hook payload on stdin and folds it into the store.
+///
+/// **The second observation path's entry point** (`docs/01-plan.md` §4). The
+/// parser and the projection landed in P8-01 and P8-02 with nothing that could
+/// call them; this is the process Claude Code runs on every hook event of every
+/// session, including the sessions a developer starts by hand in a terminal,
+/// which sprout can see no other way.
+///
+/// Three properties outrank everything else it does, and each is a mechanism
+/// here rather than a promise:
+///
+/// **It always exits 0.** A hook's exit code is a *gate*: a non-zero exit from
+/// `PreToolUse` denies the tool call, and exit 2 from a `Stop` hook blocks the
+/// model from stopping and injects the hook's stderr into the conversation
+/// verbatim — observed in Phase 0 experiment D, where the model read the
+/// message and kept working (`17` §7). sprout is observing, not gating. An
+/// observer that can refuse a tool call or trap a session in a loop because its
+/// database was locked is worse than no observer. Every failure below is
+/// therefore exit 0 with a note on stderr: stdin that is not JSON, stdin that
+/// is empty, a payload with no `session_id`, a database that will not open.
+/// `sprout()` clamps the exit code of this verb a second time, outside the
+/// command, so that a usage error or an exception escaping `run` cannot be
+/// non-zero either.
+///
+/// **It writes nothing to stdout.** stdout is an *input channel* on this
+/// surface: a `UserPromptSubmit` hook's stdout is added to the conversation as
+/// context, and a `PreToolUse` hook's stdout is where
+/// `{"hookSpecificOutput":{"permissionDecision":"deny",…}}` goes. Anything
+/// printed there lands in someone's conversation. This command has no `out`
+/// sink at all — that is the mechanism; there is nothing to write to.
+/// Diagnostics go to stderr, which is inert at exit 0.
+///
+/// **It is bounded in time.** Every hook invocation blocks the session that
+/// fired it until the process exits, so the read of stdin is given a deadline
+/// and its subscription is *cancelled* when the deadline expires. Cancelling
+/// rather than merely giving up on the future is what lets the process
+/// actually exit: a live stdin subscription keeps the isolate alive, so a
+/// session that opened the pipe and never closed it would otherwise hold the
+/// hook open past the deadline it just ignored. The store work after the read
+/// is synchronous and carries its own bound in `SproutStore.busyTimeoutMillis`;
+/// the settings block's own `timeout` is the outer backstop for anything that
+/// escapes both.
+final class HookCommand extends Command<int> {
+  /// Creates the verb.
+  ///
+  /// There is no `out`. See the class doc: stdout is an input channel here, and
+  /// not having a sink is the only version of that rule a later edit cannot
+  /// quietly break.
+  HookCommand({
+    required this.err,
+    required this.environment,
+    required this.input,
+  }) {
+    argParser
+      ..addOption('db', help: databaseOptionHelp)
+      ..addOption(
+        hookDeadlineOption,
+        help:
+            'Give up after this many milliseconds and exit 0. Defaults to '
+            '${defaultHookDeadline.inMilliseconds}.',
+      );
+  }
+
+  /// Where diagnostics go. Never stdout.
+  final StringSink err;
+
+  /// The environment, for `SPROUT_DB`.
+  final Map<String, String> environment;
+
+  /// The payload's bytes. The process's stdin in production; a test pipes.
+  final Stream<List<int>> input;
+
+  @override
+  String get name => hookVerbName;
+
+  @override
+  String get description =>
+      'Fold one Claude Code hook payload, read as JSON on stdin, into the '
+      'store. Always exits 0 and never writes to stdout.';
+
+  @override
+  String get invocation => 'sprout hook [--db <path>]';
+
+  @override
+  Future<int> run() async {
+    final results = argResults!;
+    final deadline = _deadline(results[hookDeadlineOption] as String?);
+    final dbPath = resolveDatabasePath(
+      option: results['db'] as String?,
+      environment: environment,
+    );
+
+    final bytes = await _readWithin(input, deadline);
+    if (bytes == null) {
+      err.writeln(
+        'sprout hook: gave up reading stdin after '
+        '${deadline.inMilliseconds}ms; nothing recorded.',
+      );
+      return exitOk;
+    }
+
+    // The raw log first, always, and before anything parses. This is the
+    // repair F-15 named and F-18 carries the remainder of: a record with no `session_id` — every `MalformedHookPayload`,
+    // since input that is not JSON has no fields at all — cannot become an
+    // event, because `event.node_id` is `NOT NULL` with a foreign key. Written
+    // here it is still on disk, so losing it is a recovery problem rather than
+    // an amnesia problem. Same order and same reason as `RawLog` on the runner
+    // path: the store is a view, the log is the record.
+    final rawLogPath = hookRawLogPathFor(dbPath);
+    if (!appendHookRawLog(rawLogPath, bytes)) {
+      err.writeln(
+        'sprout hook: could not append to the raw log at $rawLogPath.',
+      );
+    }
+
+    final record = HookRecord.parse(utf8.decode(bytes, allowMalformed: true));
+    if (record is MalformedHookPayload) {
+      err.writeln(
+        'sprout hook: stdin was not a JSON object (${record.error}); '
+        'kept in $rawLogPath, not stored.',
+      );
+      return exitOk;
+    }
+
+    final SproutStore store;
+    try {
+      store = SproutStore.open(path: dbPath);
+    } on Object catch (error) {
+      err.writeln(
+        'sprout hook: cannot open the store at $dbPath: $error; '
+        'kept in $rawLogPath, not stored.',
+      );
+      return exitOk;
+    }
+
+    try {
+      final nodeId = HookProjection(
+        store: store,
+        clock: DateTime.now,
+      ).observe(record);
+      if (nodeId == null) {
+        // The other half of F-18, and the one that is not malformed input: a
+        // well-formed payload that carried no `session_id`. There is no node to
+        // attribute it to and inventing one would render on the board as an
+        // agent that does not exist.
+        err.writeln(
+          'sprout hook: the payload carried no session_id, so there is no node '
+          'to record it against; kept in $rawLogPath, not stored.',
+        );
+      }
+    } on Object catch (error) {
+      err.writeln(
+        'sprout hook: could not write to the store at $dbPath: $error; '
+        'kept in $rawLogPath.',
+      );
+    } finally {
+      try {
+        store.close();
+      } on Object catch (error) {
+        err.writeln('sprout hook: closing the store failed: $error');
+      }
+    }
+    return exitOk;
+  }
+
+  Duration _deadline(String? option) {
+    if (option == null || option.isEmpty) return defaultHookDeadline;
+    final ms = int.tryParse(option);
+    // No throw, unlike `watchdogDurationFrom`. That function refuses a bad
+    // value because starting a daemon on a threshold nobody asked for is worse
+    // than not starting; here refusing would mean a non-zero exit on the one
+    // path that must never have one.
+    if (ms == null || ms <= 0) {
+      err.writeln(
+        'sprout hook: --$hookDeadlineOption must be a positive number of '
+        'milliseconds; using ${defaultHookDeadline.inMilliseconds}.',
+      );
+      return defaultHookDeadline;
+    }
+    return Duration(milliseconds: ms);
+  }
+}
+
+/// Every byte of [source], or null if [deadline] expired or it errored.
+///
+/// The subscription is cancelled on both, which is the part that matters: a
+/// pending stdin listener keeps the isolate alive, so a timeout that only
+/// completed the future would leave the process running past its own deadline
+/// against a session that never closed the pipe.
+Future<List<int>?> _readWithin(Stream<List<int>> source, Duration deadline) {
+  final completer = Completer<List<int>?>();
+  final buffer = <int>[];
+  late final StreamSubscription<List<int>> subscription;
+  final timer = Timer(deadline, () {
+    if (completer.isCompleted) return;
+    unawaited(subscription.cancel());
+    completer.complete(null);
+  });
+  subscription = source.listen(
+    buffer.addAll,
+    onDone: () {
+      if (completer.isCompleted) return;
+      timer.cancel();
+      completer.complete(buffer);
+    },
+    onError: (Object error) {
+      if (completer.isCompleted) return;
+      timer.cancel();
+      completer.complete(null);
+    },
+    cancelOnError: true,
+  );
+  return completer.future;
+}
+
+/// `sprout hooks …` — the settings that register [HookCommand].
+///
+/// A group with one subcommand rather than a bare verb, because the plural is
+/// about the *registration* and the singular is the ingest path. `sprout hook`
+/// runs eleven times a turn inside somebody's session; `sprout hooks install`
+/// is run once, by a person, at a prompt.
+final class HooksCommand extends Command<int> {
+  /// Creates the group.
+  HooksCommand({required StringSink out, required StringSink err}) {
+    addSubcommand(HooksInstallCommand(out: out, err: err));
+  }
+
+  @override
+  String get name => 'hooks';
+
+  @override
+  String get description =>
+      'Manage the Claude Code settings that register `sprout hook`.';
+}
+
+/// `sprout hooks install [--write <path>] [--command <path>]`.
+///
+/// **Printing is the default and it touches nothing.** The block goes to stdout
+/// and the one line a human would act on goes to stderr, so the JSON stays
+/// pipeable.
+///
+/// It will not write `~/.claude/settings.json`, and neither will the default:
+/// that file is the developer's machine-wide configuration, installing a hook
+/// into it is a decision to make with the printed block in front of them, and
+/// everything outside this repo is read-only to the sessions that build sprout
+/// (`.game_loop/INVARIANTS.md` INV3). `--write` takes an explicit path and
+/// merges rather than replacing — see `mergeHookSettings`.
+final class HooksInstallCommand extends Command<int> {
+  /// Creates the verb.
+  HooksInstallCommand({required this.out, required this.err}) {
+    argParser
+      ..addOption(
+        'write',
+        help:
+            'Merge into this settings file instead of printing. Never '
+            'defaults to ~/.claude/settings.json.',
+      )
+      ..addOption(
+        'command',
+        help:
+            'The command line the entries invoke. Defaults to this '
+            'executable plus " $hookVerbName".',
+      );
+  }
+
+  /// Where the settings JSON goes.
+  final StringSink out;
+
+  /// Where the human-facing instruction and every error go.
+  final StringSink err;
+
+  @override
+  String get name => 'install';
+
+  @override
+  String get description =>
+      'Print the settings block registering `sprout hook` for all '
+      '${hookKindsByEventName.length} hook events, or merge it into a '
+      'settings file.';
+
+  @override
+  String get invocation =>
+      'sprout hooks install [--write <path>] [--command <line>]';
+
+  @override
+  Future<int> run() async {
+    final results = argResults!;
+    final command = (results['command'] as String?) ?? hookCommandLine();
+    final target = results['write'] as String?;
+
+    if (target == null) {
+      out.writeln(encodeHookSettings(hookSettingsBlock(command: command)));
+      err.writeln(
+        'sprout: merge the block above into ~/.claude/settings.json to '
+        'register sprout for every session on this machine.',
+      );
+      return exitOk;
+    }
+
+    final file = File(p.absolute(target));
+    final Map<String, Object?> existing;
+    try {
+      existing = file.existsSync()
+          ? _decodeSettings(file.readAsStringSync())
+          : const {};
+    } on Object catch (error) {
+      err.writeln('sprout: ${file.path} is not readable JSON: $error');
+      return exitStoreUnreadable;
+    }
+
+    try {
+      writeHookSettings(
+        file.path,
+        mergeHookSettings(existing: existing, command: command),
+      );
+    } on Object catch (error) {
+      err.writeln('sprout: cannot write ${file.path}: $error');
+      return exitStoreUnreadable;
+    }
+
+    err.writeln(
+      'sprout: registered `$command` for '
+      '${hookKindsByEventName.length} hook events in ${file.path}.',
+    );
+    return exitOk;
+  }
+
+  static Map<String, Object?> _decodeSettings(String text) {
+    if (text.trim().isEmpty) return const {};
+    final decoded = jsonDecode(text);
+    if (decoded is! Map<String, Object?>) {
+      throw FormatException(
+        'expected a JSON object, got ${decoded.runtimeType}',
+      );
+    }
+    return decoded;
+  }
+}

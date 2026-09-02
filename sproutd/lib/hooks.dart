@@ -23,7 +23,11 @@
 /// its spelling and records as `hook.unknown`.
 ///
 /// Implementation lives under `lib/src/hooks/`. Start at [HookRecord] for the
-/// parse and [HookProjection] for the fold into the store.
+/// parse and [HookProjection] for the fold into the store. Two more pieces
+/// arrived with P8-03, which built the process that calls them: [appendHookRawLog]
+/// is the durable copy every payload is written to *before* the projection runs,
+/// and [hookSettingsBlock] generates the settings that register `sprout hook`
+/// for all eleven events.
 ///
 /// The two halves are deliberately separable: [HookRecord.parse] is a pure
 /// function over bytes with no store, no clock and no filesystem, and
@@ -55,3 +59,22 @@ export 'src/hooks/payload.dart'
     show HookPayload, HookRecord, MalformedHookPayload;
 export 'src/hooks/projection.dart'
     show HookProjection, hookNodeIdPrefix, unknownHookProject;
+export 'src/hooks/raw_log.dart'
+    show
+        appendHookRawLog,
+        hookRawLogFrameMarker,
+        hookRawLogName,
+        hookRawLogPathFor;
+export 'src/hooks/settings.dart'
+    show
+        encodeHookSettings,
+        hookCommandLine,
+        hookMatcherAll,
+        hookMatcherEvents,
+        hookMatcherGroup,
+        hookSettingsBlock,
+        hookSettingsTimeoutSeconds,
+        hookVerbName,
+        isSproutHookCommand,
+        mergeHookSettings,
+        writeHookSettings;

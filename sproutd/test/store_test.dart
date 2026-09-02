@@ -696,11 +696,21 @@ void main() {
     test('with it, the same write waits for the lock and then succeeds', () async {
       SproutStore.open(path: dbPath).close();
       const hold = Duration(milliseconds: 400);
+
+      // **Opened before the lock is taken, which it did not used to be.**
+      // `migrate` now begins its own `BEGIN IMMEDIATE` pass — that is what
+      // stops two `sprout hook` processes racing to create the schema on a
+      // fresh database — so opening under a held lock does the waiting inside
+      // `SproutStore.open` and `putNode` then sails through in 4ms. The wait is
+      // just as real either way, but this test is about a *write* meeting a
+      // held lock, so the connection is established first and only the write is
+      // timed.
+      final store = SproutStore.open(path: dbPath);
+      addTearDown(store.close);
+
       final events = await holdWriteLock(dbPath, holdFor: hold);
       await events.firstWhere((e) => e == 'held');
 
-      final store = SproutStore.open(path: dbPath);
-      addTearDown(store.close);
       final watch = Stopwatch()..start();
       // The blocking call. It returns only once the holder isolate has let go.
       store.putNode(aNode('waited-for-it'));

@@ -73,7 +73,10 @@ and it is why the remedy has to be detection on the file rather than more parsin
 ### F-16 — A session sprout spawned itself is recorded TWICE when the hooks are installed
 
 **Status: OPEN, and it is a deliberate v1 limit rather than a bug to fix in passing.** Found by
-P8-02, which is the leaf that created the second namespace.
+P8-02, which is the leaf that created the second namespace. **Reachable since P8-03**, which shipped
+`sprout hooks install` — until then nothing could register the hooks, so the second writer existed
+but never ran on anyone's machine and the double-vision was theoretical. It is not any more: a
+developer who installs the block and also runs `sprout run` gets both.
 
 sprout now has two writers into one `node` table and they identify nodes differently:
 
@@ -107,31 +110,52 @@ explicit join above, both trees are honest and neither is guessed.
 
 ---
 
-### F-15 — Hook input that carries no `session_id` has nowhere in the store to go
+### F-18 — `hook.malformed` is durable on disk but still cannot be an event, and nothing reads the log
 
-**Status: OPEN.** Found by P8-02 while wiring the `hook.malformed` kind that P8-01 shipped.
+**Status: OPEN.** The narrowed remainder of **F-15**, which P8-03 repaired the way F-15 named first
+and which is deleted from this file by the same commit. Read `sproutd/lib/src/hooks/raw_log.dart`
+and `HookCommand` in `sproutd/bin/sprout.dart` before acting on this.
 
-`HookProjection.observe` returns null and writes **nothing** for a record with no `session_id`.
-That is every `MalformedHookPayload` — input that was not JSON has no fields at all — and any
-payload that arrives without the field.
+**What P8-03 fixed.** `sprout hook` appends the bytes it was handed, verbatim and framed, to
+`hooks.raw` beside the database **before** anything parses them and before the projection runs —
+the same order and the same reason as `RawLog` on the runner path. A payload with no `session_id`,
+every `MalformedHookPayload` included, is therefore on disk. F-15's *"nothing durable holds a
+payload the store cannot take"* is no longer true.
 
-It is not a drop that could have been avoided in this leaf. `event.node_id` is `NOT NULL` with a
-foreign key to `node`, so an event needs a node; the only ways to store such a record anyway are to
-attach it to an unrelated session, which is a lie, or to mint a sentinel node, which would then
-render on the board as an agent that does not exist and would need a `NodeStatus` value that does
-not exist either.
+**What is still true, and is this finding.** The store itself is unchanged: `event.node_id` is
+`NOT NULL` with a foreign key, so `hook.malformed` remains a kind this build can produce as a value
+and cannot persist as a row, and the asymmetry with the runner path — where a `MalformedFrame` *is*
+stored, against the root of the run sprout launched — stands. F-15's second repair, making
+`event.node_id` nullable, is a schema migration against databases already on disk and was correctly
+out of P8-03's scope.
 
-**The asymmetry with the runner path is the finding.** There, a `MalformedFrame` *is* stored, as
-`frame.malformed` against the root of the run — because sprout launched that run and always knows
-its root. On the hook path the payload is the only thing that could say which session it belongs
-to, so when it is unreadable there is no root to fall back on.
+**And nothing reads `hooks.raw`.** There is no verb that replays it, counts its frames or reports
+that a session's payloads were kept but not stored. Losing a record is now a recovery problem rather
+than an amnesia problem *only if someone can perform the recovery*; today the file is written and
+never opened again, which is one step better than the drop it replaced and is not the whole repair.
+The frame format is designed to be read — a `sprout-hook <iso8601> <byte count>` header, then
+exactly those bytes — so a reader is a small verb, not a redesign.
 
-`hook.malformed` is therefore a kind this build can produce as a **value** but cannot currently
-**persist**. Two repairs are plausible and neither belongs to this leaf: a raw hook log beside the
-store, which is what `RawLog` already does for the stream path and would make the store a view of
-something durable; or making `event.node_id` nullable, which is a schema migration against
-databases already on disk. P8-03 owns the process that will actually receive these bytes and is the
-natural place to decide.
+---
+
+### F-19 — `sprout hooks install` recognises its own previous entry by a heuristic on the command text
+
+**Status: OPEN, and it is a stated limit rather than a bug.** Found by P8-03 while writing the
+merge. **Read** `isSproutHookCommand` in `sproutd/lib/src/hooks/settings.dart`.
+
+Re-running `sprout hooks install --write` must leave exactly one sprout entry per event however the
+command was spelled last time, and there is nothing in the entry schema to tag with: the four keys
+the real CLI accepted in
+`docs/research/fixtures/phase0/hook-settings-all-events.json` are `type`, `command`, `timeout` and
+`matcher`, and an invented fifth is a field a schema check could reject on the developer's own
+machine. So an entry is recognised as sprout's when its command ends with the `hook` verb and
+contains the string `sprout`.
+
+Both command lines this build emits satisfy that, and the merge also matches the exact command it is
+about to write, so the realistic reinstall paths are covered. A `--command` naming a wrapper with
+neither property is not recognised on a second run and would be duplicated. The fix, if the wrapper
+case ever turns up, is a marker the CLI is known to tolerate — which needs a probe against a live
+binary, not a decision in this file.
 
 ---
 

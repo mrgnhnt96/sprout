@@ -5,30 +5,13 @@ import 'package:sprout_protocol/protocol.dart';
 import 'package:sprout_protocol/snapshot.dart';
 import 'package:sprout_protocol/values.dart';
 
-/// The event kind announcing a node for the first time.
-///
-/// **Written here a second time, and a test compares the two.** The producer's
-/// spelling is `nodeObservedKind` in
-/// `sproutd/lib/src/store/sprout_store.dart`, and this package cannot import it:
-/// `package:sproutd` reaches `dart:io` and `dart:ffi` and so cannot be compiled
-/// for the browser at all — that was finding F-07. Their real home is
-/// `sprout_protocol`, beside the frames, and moving them there is the actual
-/// repair; until then `test/kinds_test.dart` reads the producer's source and
-/// fails if the strings drift. Two lists that must stay equal is the shape of
-/// F-01, and what made F-01 a bug was not the duplication but that nothing
-/// compared the two.
-const String nodeObservedKind = 'runner.observed';
-
-/// The event kind announcing that a node already in the feed changed.
-///
-/// See [nodeObservedKind] for why this string is written twice.
-///
-/// This is the kind the board actually depends on. In the Phase 0 `B.ndjson`
-/// capture both subagents are announced with a **null** `current_task` and
-/// given one several seconds later by this event, so a client that handled
-/// creation and ignored updates would render two permanently blank tasks and
-/// look entirely healthy doing it.
-const String nodeUpdatedKind = 'runner.updated';
+// The kinds this board branches on — `nodeObservedKind` and
+// `nodeUpdatedKind` — come from `package:sprout_protocol/values.dart`,
+// imported above, which is the same declaration `SproutStore.putNode` writes
+// with. This file used to spell both strings a second time because it cannot
+// import `package:sproutd` (F-07: dart:io and dart:ffi), and
+// `test/kinds_test.dart` compared the two by reading the producer's source.
+// That was finding F-11, and one declaration is what closed it.
 
 /// What a node's line says when the feed has mentioned it but never described
 /// it.

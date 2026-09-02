@@ -29,28 +29,14 @@ class TreeIntegrityError implements Exception {
       'A parent cycle is the usual cause.';
 }
 
-/// The event appended when a node row is written for the first time.
-///
-/// Attributed to the node's own id and carrying the whole row, so that a
-/// consumer holding a snapshot plus every delta since learns the node exists
-/// without taking a fresh snapshot. [SproutStore.putNode] appends it beside
-/// the row it writes, which is what makes "a node cannot enter the graph
-/// without the feed saying so" a property of the store rather than a habit its
-/// callers have to keep. F-02 and F-10 were each one caller that did not.
-const String nodeObservedKind = 'runner.observed';
-
-/// The event appended when a node already in the feed really changes.
-///
-/// A node's `status`, `current_task` and `parent_id` all move while it runs,
-/// and a feed that announced the node once and then went quiet would leave a
-/// live tree showing it frozen on its first label. Separate from
-/// [nodeObservedKind] so that a change is never mistaken for a second creation
-/// of the same node.
-///
-/// **Only a change a board renders counts.** A write that moves none of those
-/// three fields appends nothing at all — otherwise a status poll would flood
-/// the feed a UI reads.
-const String nodeUpdatedKind = 'runner.updated';
+// `nodeObservedKind` and `nodeUpdatedKind` — the kinds [SproutStore.putNode]
+// appends below — are declared in `package:sprout_protocol/values.dart`,
+// imported above, and re-exported from `package:sproutd/store.dart` so that
+// every importer of this store still reads them from the path it always did.
+// They moved there because they are wire vocabulary rather than a fact about
+// SQLite: the browser branches on the strings it reads back off the socket and
+// cannot import this library, so it used to spell them a second time. That was
+// finding F-11.
 
 /// The node graph and the append-only event feed, on one SQLite file.
 ///

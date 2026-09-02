@@ -765,6 +765,46 @@ void main() {
       expect((ok as DeltaFrame).events.single.seq, 1);
     });
   });
+
+  group('the node event kinds are wire vocabulary', () {
+    // These two strings are the `kind` column of an `event` row, they travel
+    // over the socket inside a DeltaFrame, and the browser switches on what it
+    // reads back. Before F-11 they were declared twice — once in
+    // `sproutd/lib/src/store/sprout_store.dart` and once in
+    // `sprout_ui/lib/src/live_tree.dart` — and `sprout_ui/test/kinds_test.dart`
+    // read the producer's source to check the two spellings had not drifted.
+    // There is one declaration now, in `package:sprout_protocol/values.dart`,
+    // so drift is a compile error rather than something a test has to notice.
+    //
+    // What no type can check is the VALUE. That is what these assertions are
+    // for, and they are deliberately literal.
+    //
+    // Note also HOW this file reaches them: it imports
+    // `package:sproutd/store.dart` and never sprout_protocol directly, so
+    // these lines do not compile unless the store's re-export shim still
+    // carries both names. That is the other half of F-11 — the declaration
+    // moved, and no existing importer had to.
+
+    test('runner.observed keeps its spelling', () {
+      // Not merely "the constant equals itself": every sprout database ever
+      // written holds this exact text in its `kind` column, and the feed is
+      // append-only by schema trigger, so a rename cannot be migrated. A
+      // consumer taught a new spelling would quietly stop recognising history
+      // it already has. Change this line only on purpose.
+      expect(nodeObservedKind, 'runner.observed');
+    });
+
+    test('runner.updated keeps its spelling', () {
+      expect(nodeUpdatedKind, 'runner.updated');
+    });
+
+    test('and they are distinct, so a board can tell them apart', () {
+      // The whole reason there are two: LiveTree applies one as a whole node
+      // and the other as a {from, to} patch. Collapsing them would make a
+      // change indistinguishable from a second creation.
+      expect(nodeObservedKind, isNot(nodeUpdatedKind));
+    });
+  });
 }
 
 /// What `_idFor` computes for the fixed input above.

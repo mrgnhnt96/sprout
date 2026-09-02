@@ -17,20 +17,6 @@ are quoted in the entry.
 
 ## Open
 
-### F-11 — `runner.observed` / `runner.updated` are wire vocabulary that lives in `sproutd`
-
-**Status: OPEN, low cost, high leverage.** Found by the P3-04 Crawler. **Fix lives in**
-`sprout_protocol/lib/` and `sproutd/lib/src/store/sprout_store.dart` — the store, not the
-projection: F-10's fix moved the two constants there, beside the `putNode` that emits them, and
-renamed them `nodeObservedKind` / `nodeUpdatedKind` because they now announce the root too.
-
-Those two `kind` strings travel over the socket and a browser branches on them, which makes them
-part of the protocol — but they are declared in `sproutd`, which `sprout_ui` cannot import at all
-(F-07: `package:sproutd` reaches `dart:io` and `dart:ffi`). So `sprout_ui/lib/src/live_tree.dart`
-spells them a second time. That is the shape of F-01, and the mitigation is F-01's own lesson:
-`sprout_ui/test/kinds_test.dart` reads the producer's source and fails if the strings or the payload
-shapes drift. Moving the constants into `sprout_protocol` removes the duplication entirely.
-
 ### F-08 — The rule-file guard reads command text, so an interpreter heredoc walks past it
 
 **Status: OPEN, and it is game_loop's to fix, not sprout's.** Found this session, by the P3-02

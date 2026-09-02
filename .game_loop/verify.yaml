@@ -91,9 +91,20 @@
 #   .claude/**      hook registration, read by Claude Code at session start and
 #                   not executable by any check here.
 #
-# NOT excluded, and deliberately so: sprout_ui/ does not exist yet (Phase 3).
-# When it lands it will be UNCHECKED and will say so on every commit that
-# touches it, which is the correct loud default until it has a real check.
+# sprout_ui landed in P3-02 with real checks, so it takes a rule rather than
+# staying UNCHECKED. Same three commands, run from its own directory because it
+# is a separate package with its own lockfile on purpose (revali and
+# jaspr_builder cannot share one resolution).
+#
+# `dart test` here RUNS `jaspr build` and asserts the emitted bundle exists and
+# is non-empty. That is deliberate and it is why this rule is worth having:
+# `jaspr build` exits 0 when the compiler skips the entrypoint, so gating on
+# the build alone is a check that cannot fail.
+"sprout_ui/**":
+  - "cd sprout_ui && dart format --output=none --set-exit-if-changed ."
+  - "cd sprout_ui && dart analyze --fatal-infos --fatal-warnings"
+  - "cd sprout_ui && dart test"
+
 "unchecked-ok":
   - "docs/**"
   - "*.md"

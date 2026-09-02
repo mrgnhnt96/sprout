@@ -1,47 +1,40 @@
-/// The two event kinds this package spells for itself, compared to the source
-/// that emits them.
+/// The parts of the producer this board still has to agree with by hand.
 ///
-/// `lib/src/live_tree.dart` writes `runner.observed` and `runner.updated` as
-/// literals because it cannot import the package that produces them:
-/// `package:sproutd` reaches `dart:io` and `package:sqlite3`'s `dart:ffi`, and
-/// build_web_compilers refuses an entrypoint on its transitive library import
-/// graph — silently, exiting 0 with no bundle. That was F-07 and the split
-/// that closed it is deliberate.
+/// **This file used to compare the two spellings of the event kinds.** That is
+/// gone: `runner.observed` and `runner.updated` are declared once, in
+/// `package:sprout_protocol/values.dart`, and both `SproutStore.putNode` and
+/// `LiveTree.apply` import that one declaration. Drift is now a compile error,
+/// so a test that watched for it has nothing left to watch. That was the
+/// repair for finding F-11, and their literal values are pinned where the
+/// declaration lives — `sproutd/test/protocol_test.dart`, since
+/// `sprout_protocol` keeps its tests in sproutd on purpose.
 ///
-/// So two files hold one vocabulary. **That is the shape of F-01, and what
-/// made F-01 a bug was not the duplication but that nothing compared the two.**
-/// This is the comparison. It is the same remedy `servedAssetNames` takes in
-/// `sproutd/routes/controllers/ui_controller.dart` against the generated
-/// payload, for the same reason.
+/// **What the move did not close is the PAYLOAD.** A kind names an event; it
+/// says nothing about the shape of the map that comes with it. `runner.updated`
+/// is built in `sproutd` as `{from, to}` per changed field and applied here by
+/// reading those two keys, and `runner.observed` carries a whole node built
+/// there and unpacked here — two derivations of one shape, in two packages,
+/// with no shared declaration and nothing but this file comparing them. That
+/// is still F-01's shape, and either side could be reshaped without the kind
+/// changing, which is precisely the change a type checker cannot see.
 ///
-/// The real repair is to move these constants into `sprout_protocol`, beside
-/// the frames, where both packages can import one declaration. They are wire
-/// vocabulary: the producer writes them into a `kind` column that travels over
-/// a socket, and a consumer branches on them. That change touches sproutd and
-/// is not this leaf's; `docs/02-open-findings.md` records it.
+/// So the assertions below read the producer as TEXT. That is a blunt
+/// instrument and it is deliberate: the alternative is a shared codec, which
+/// is a larger change than F-11 was, and until someone makes it the comparison
+/// has to exist somewhere.
 library;
 
 import 'dart:io';
 
-import 'package:sprout_ui/src/live_tree.dart';
 import 'package:test/test.dart';
 
 /// The producer, read as text rather than imported.
 ///
 /// The store, not the projection: F-10 moved the announcement into
 /// `SproutStore.putNode`, so that a node row cannot be written without the
-/// feed learning of it whoever writes it. Both kinds and both payload shapes
-/// are built there now, which is why this file is what the assertions below
-/// read.
+/// feed learning of it whoever writes it. Both payload shapes are built there
+/// now, which is why this file is what the assertions below read.
 final producer = File('../sproutd/lib/src/store/sprout_store.dart');
-
-/// Reads `const String <name> = '<value>';` out of Dart source.
-///
-/// Returns null when the declaration is absent, which is a different
-/// observation from a value that does not match — a rename must fail loudly
-/// rather than pass because a regex found nothing.
-String? declaredValue(String source, String name) =>
-    RegExp("const String $name = '([^']+)';").firstMatch(source)?.group(1);
 
 void main() {
   test('sproutd is still where the producer lives', () {
@@ -52,34 +45,6 @@ void main() {
       isTrue,
       reason: '${producer.path} is gone, so nothing below compares anything',
     );
-  });
-
-  group('the kinds this board branches on', () {
-    final source = producer.readAsStringSync();
-
-    test('runner.observed matches the producer, character for character', () {
-      expect(declaredValue(source, 'nodeObservedKind'), isNotNull);
-      expect(declaredValue(source, 'nodeObservedKind'), 'runner.observed');
-      expect(nodeObservedKind, 'runner.observed');
-    });
-
-    test('runner.updated matches the producer, character for character', () {
-      expect(declaredValue(source, 'nodeUpdatedKind'), isNotNull);
-      expect(declaredValue(source, 'nodeUpdatedKind'), 'runner.updated');
-      expect(nodeUpdatedKind, 'runner.updated');
-    });
-
-    test('and the regex really can fail', () {
-      // The half that keeps the two above from passing vacuously. A matcher
-      // that returns null for everything would satisfy `isNotNull` never — but
-      // one that matched too greedily would satisfy them always.
-      expect(declaredValue(source, 'noSuchConstantExists'), isNull);
-      expect(
-        declaredValue("const String a = 'x';", 'a'),
-        'x',
-        reason: 'the regex must read a value, not merely find a name',
-      );
-    });
   });
 
   test('the payload shapes this board reads are still what is written', () {

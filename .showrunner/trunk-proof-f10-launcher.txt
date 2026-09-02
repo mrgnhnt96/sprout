@@ -1,0 +1,51 @@
+Trunk proof — F-10 and the sprout ui launcher, end to end as a user would run it
+sprout HEAD 45d7c2d, 2026-09-02.
+
+Both halves in one flow: start the board with one command, attach it while the tree is
+EMPTY, then start a run and watch the root arrive. That ordering is the whole point —
+a snapshot always shows the root, so this defect is invisible to any test that
+snapshots after the run.
+
+=== BEFORE (two binaries built at aad44b3) ===
+PRE-F-10 consumer verdict — a consumer attached BEFORE any run existed
+Binary built at aad44b3. Empty database, board attached, then 'sprout run' started.
+
+=== FINAL BOARD ===
+cursor s1.718c020a73960445.131
+LIVE · heartbeat 20:02Z
+checkpointed · mtkivt6r-2e4eea29/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 20:02Z (0m) · next NONE SCHEDULED · spend ?
+  checkpointed · mtkivt6r-2e4eea29/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 20:02Z (0m) · next NONE SCHEDULED · spend ?
+? · mtkivt6r-2e4eea29 · not described on this stream · 119 events
+holds nothing
+
+The root is a STRANGER: its row was written with putNode and no event followed, so a
+consumer holding every delta since it attached never learns the node's project, task or
+status. The subagents render unparented because their parent is not a known node.
+
+=== AFTER (one binary built at trunk) ===
+POST-F-10 consumer verdict — the same flow, through the new 'sprout ui' launcher
+Single binary built at trunk. HOME clean, SPROUT_DB unset so the DEFAULT database is used.
+
+$ sprout ui
+http://127.0.0.1:8791/
+db  /private/tmp/claude-501/-Users-mrgnhnt96-Development-dart-sprout/D0B0C70B-48A1-44B3-A1F9-839AA09244F8/scratchpad/usehome/.sprout/sprout.db
+Ctrl-C to stop.
+
+=== FINAL BOARD ===
+cursor s1.e934c456f3bb9f4f.134
+LIVE · heartbeat 20:01Z
+checkpointed · mtkitrm0-26e05b85 · map the repo and delegate two probes · since 20:00Z (0m) · next NONE SCHEDULED · spend ?
+  checkpointed · mtkitrm0-26e05b85/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 20:00Z (0m) · next NONE SCHEDULED · spend ?
+    checkpointed · mtkitrm0-26e05b85/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 20:00Z (0m) · next NONE SCHEDULED · spend ?
+holds nothing
+
+The root arrives NAMED, with its task, from the feed alone — no re-snapshot — and both
+subagents nest under it. 'holds nothing' is LiveTree.strangers, now empty.
+
+Artifact count: 2 -> 1. Before, sprout 6,684,848 + sproutd 8,162,288 = 14,847,136 bytes.
+After, one sprout at 8,523,440. The plan's 'single compiled Dart binary' is now true.
+
+Run from / with HOME clean and SPROUT_DB unset, so the daemon opened the same default
+database sprout run writes. LiveTree.strangers is deliberately unchanged and still
+renders an id sprout emits events about but has no row for — the fix removes the common
+case, not the guard.

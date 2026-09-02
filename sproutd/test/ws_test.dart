@@ -252,24 +252,25 @@ void main() {
     });
   });
 
-  group('the CLI and the daemon do not agree on an instance id', () {
-    // This pins a KNOWN DEFECT rather than a desired behaviour, so that the
-    // day it is fixed this test fails and says so instead of staying quiet.
+  group('the CLI and the daemon agree on an instance id', () {
+    // Finding F-01, now asserted as the behaviour rather than as the defect.
     //
-    // `SproutInstance.current` is generated per process, and the daemon uses
-    // it (`daemonInstance`). `bin/sprout.dart` deliberately does not — it
-    // derives a stable id from the absolute database path plus the identity of
-    // the feed's first event (`instanceOf`). So a cursor a user takes from
-    // `sprout snapshot` is refused by this socket every time, and the join the
-    // whole protocol is built around is broken between the two surfaces.
+    // The daemon used to hand out `SproutInstance.current`, generated per
+    // process, so a cursor a user copied out of `sprout snapshot` was refused
+    // by this socket every single time and the join the whole protocol exists
+    // to protect was broken between the two surfaces sprout ships. Both sides
+    // now call one derivation, `SproutInstance.forFeed`, over the absolute
+    // database path and the identity of the feed's first event.
     //
-    // The fix is to lift `instanceOf` into `lib/protocol.dart` and call it
-    // from both. It is NOT to compute a second hash here: two independent
-    // derivations that must stay equal is the bug, not the repair.
+    // These two tests go through the real entry points on purpose —
+    // `cli.instanceForStore` is what `sprout snapshot` mints with and
+    // `daemonInstanceFor` (inside `_serve`) is what the socket serves with —
+    // so they would still fail if one surface were quietly changed to compute
+    // its own hash.
     late _Wire wire;
     tearDown(() => wire.close());
 
-    test('so a cursor sprout snapshot minted is refused by the socket', () {
+    test('so a cursor sprout snapshot minted is accepted by the socket', () {
       return _withStore((store, dbPath) async {
         store
           ..putNode(
@@ -280,29 +281,34 @@ void main() {
             ),
           )
           ..append(nodeId: 'a', kind: 'runner.spawned');
-        final fromCli = cli
-            .instanceOf(store, databasePath: dbPath)
-            .cursorAt(1)
-            .encode();
+        final fromCli = cli.instanceForStore(store).cursorAt(1).encode();
 
         wire = await _serve(store: store, since: fromCli);
-        final bye = ProtocolFrame.decodeLine(await wire.next()) as ByeFrame;
+        // Accepted means a picture and a `ready`, not a `bye`. Asserting the
+        // frames rather than just "not refused" is the difference between the
+        // cursor being honoured and the refusal merely being worded
+        // differently.
         expect(
-          bye.reason,
-          ByeReason.refused,
-          reason:
-              'FIXME(P2-05 finding): the socket should accept a cursor the '
-              'CLI minted against the same database. It cannot until the '
-              'derivation in bin/sprout.dart is lifted into lib/protocol.dart '
-              'as SproutInstance.forStore(...) and used by both.',
+          (jsonDecode(await wire.next()) as Map<String, Object?>)['type'],
+          snapshotFrameType,
         );
-        expect(bye.detail, contains('take a fresh snapshot'));
+        final ready = ProtocolFrame.decodeLine(await wire.next());
+        expect(ready, isA<ReadyFrame>());
+        expect(
+          ready.cursor.instanceId,
+          cli.instanceForStore(store).id,
+          reason:
+              'the daemon must hand back cursors in the same namespace '
+              'the CLI mints in, or the next --since starts the loop again',
+        );
       });
     });
 
-    test('and the CLI would have accepted its own cursor', () {
-      // The other half, so the test above is a statement about the *daemon*
-      // and not about a cursor that was broken to begin with.
+    test('and a cursor from a different database is still refused', () {
+      // The pair (INV8). Acceptance on its own cannot tell a working join from
+      // a check that was deleted: this is the case that must still be refused,
+      // and it is a *real* second database rather than a made-up id, so it
+      // fails if the derivation ever collapses to something constant.
       return _withStore((store, dbPath) async {
         store
           ..putNode(
@@ -313,7 +319,52 @@ void main() {
             ),
           )
           ..append(nodeId: 'a', kind: 'runner.spawned');
-        final instance = cli.instanceOf(store, databasePath: dbPath);
+
+        await _withStore((other, otherPath) async {
+          other
+            ..putNode(
+              const SproutNode(
+                id: 'a',
+                project: '/p',
+                status: NodeStatus.working,
+              ),
+            )
+            ..append(nodeId: 'a', kind: 'runner.spawned');
+          final elsewhere = cli.instanceForStore(other);
+          expect(
+            elsewhere.id,
+            isNot(cli.instanceForStore(store).id),
+            reason: 'two databases at two paths are two instances',
+          );
+
+          wire = await _serve(
+            store: store,
+            since: elsewhere.cursorAt(1).encode(),
+          );
+          final bye = ProtocolFrame.decodeLine(await wire.next()) as ByeFrame;
+          expect(bye.reason, ByeReason.refused);
+          // Both ids named, which is what makes the refusal actionable.
+          expect(bye.detail, contains(elsewhere.id));
+          expect(bye.detail, contains(cli.instanceForStore(store).id));
+          expect(bye.detail, contains('take a fresh snapshot'));
+        });
+      });
+    });
+
+    test('and the CLI accepts its own cursor', () {
+      // The third leg: the test above is a statement about the *daemon* only
+      // if the cursor was good to begin with.
+      return _withStore((store, dbPath) async {
+        store
+          ..putNode(
+            const SproutNode(
+              id: 'a',
+              project: '/p',
+              status: NodeStatus.working,
+            ),
+          )
+          ..append(nodeId: 'a', kind: 'runner.spawned');
+        final instance = cli.instanceForStore(store);
         expect(
           instance.accept(instance.cursorAt(1).encode()),
           isA<CursorAccepted>(),
@@ -552,9 +603,10 @@ Future<void> _until(
 
 /// Opens a file-backed store in a temp directory and hands both to [body].
 ///
-/// File-backed rather than in-memory because `cli.instanceOf` fingerprints the
-/// **absolute path** along with the feed, and an in-memory store has no path to
-/// fingerprint.
+/// File-backed rather than in-memory because the instance derivation
+/// fingerprints the **absolute path** along with the feed, and an in-memory
+/// store has no path to fingerprint — it reports a per-connection `memory:<n>`
+/// instead, which two processes could never agree on.
 Future<void> _withStore(
   Future<void> Function(SproutStore store, String path) body,
 ) async {
@@ -601,7 +653,10 @@ Future<_Wire> _serve({
   final db = store ?? SproutStore.memory();
   seed?.call(db);
 
-  final instance = SproutInstance.generate();
+  // The daemon's own derivation, not a generated id: this is what makes the
+  // socket under test the one the compiled daemon serves, and it is what the
+  // `agree on an instance id` group joins against.
+  final instance = daemonInstanceFor(db);
   final wakeups = StreamController<void>();
   final heartbeats = StreamController<void>();
   final shutdown = Completer<String>();

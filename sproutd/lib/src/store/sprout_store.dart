@@ -42,7 +42,7 @@ class TreeIntegrityError implements Exception {
 /// A portable Linux build will need `sqlite3_native_assets` or a bundled
 /// library. Deliberately not solved here.
 class SproutStore {
-  SproutStore._(this._db);
+  SproutStore._(this._db, this.databasePath);
 
   /// Opens the store at [path], creating the file and its directory if needed.
   ///
@@ -50,12 +50,12 @@ class SproutStore {
   /// or use [SproutStore.memory]; nothing in the suite may touch the real
   /// `~/.sprout/sprout.db`.
   factory SproutStore.open({String? path}) {
-    final file = path ?? defaultDatabasePath();
+    final file = p.absolute(path ?? defaultDatabasePath());
     Directory(p.dirname(file)).createSync(recursive: true);
     final db = sqlite3.open(file);
     _configure(db);
     migrate(db);
-    return SproutStore._(db);
+    return SproutStore._(db, file);
   }
 
   /// Opens a throwaway in-memory store. For tests.
@@ -67,10 +67,28 @@ class SproutStore {
     final db = sqlite3.openInMemory();
     _configure(db);
     migrate(db);
-    return SproutStore._(db);
+    return SproutStore._(db, 'memory:${_memoryStores++}');
   }
 
   final Database _db;
+
+  /// The database this store is a connection to, as an absolute path.
+  ///
+  /// **Absolute, always**, including when a relative path was passed to
+  /// [SproutStore.open]. `SproutInstance.forFeed` hashes this to namespace the
+  /// cursors taken against this feed, so a relative value would make a
+  /// cursor's instance id depend on the process's working directory and two
+  /// consumers of one database would refuse each other's cursors.
+  ///
+  /// An in-memory store has no file, so it reports `memory:<n>` with a counter
+  /// that is unique within the process. Not cosmetic: two in-memory stores
+  /// really are two different databases, and a shared literal would make two
+  /// empty ones derive the same instance id — a collision that silently
+  /// accepts a foreign cursor, which is the one outcome the instance id exists
+  /// to prevent.
+  final String databasePath;
+
+  static int _memoryStores = 0;
 
   /// A generous ceiling on tree depth, used to bound the recursive CTE.
   ///
@@ -254,6 +272,19 @@ class SproutStore {
       [cursor, nodeId, limit ?? -1],
     );
     return rows.map(_event).toList();
+  }
+
+  /// The oldest event in the feed, or null while the feed is empty.
+  ///
+  /// The feed is append-only, so this row never changes while the database is
+  /// the same database and is a different row the moment the file is replaced.
+  /// That is what makes it the feed's identity, and it is read through one
+  /// accessor rather than spelled as `eventsSince(0, limit: 1)` at each call
+  /// site so that every surface fingerprints the same row. See
+  /// `SproutInstance.forFeed`, its only caller in production.
+  SproutEvent? get firstEvent {
+    final rows = eventsSince(0, limit: 1);
+    return rows.isEmpty ? null : rows.single;
   }
 
   /// Closes the underlying database. Further calls will throw.

@@ -104,7 +104,7 @@ class TreeController {
   @Get()
   Map<String, Object?> snapshot() => takeSnapshot(
     StoreSnapshotSource(_store),
-    instance: daemonInstance,
+    instance: daemonInstanceFor(_store),
   ).toJson();
 
   /// `ws://…/api/tree/events[?since=<cursor>]` — the long-lived socket.
@@ -134,31 +134,36 @@ class TreeController {
   Stream<StringContent> events(@Query('since') String? since) =>
       treeSocketFrames(
         store: _store,
-        instance: daemonInstance,
+        instance: daemonInstanceFor(_store),
         since: since,
       ).map((frame) => StringContent(jsonEncode(frame)));
 }
 
 /// The instance this daemon hands out cursors from.
 ///
-/// **This is a known defect, kept visible on purpose.** It is
-/// `SproutInstance.current`, which is *generated per process*, so a cursor a
-/// user took from `sprout snapshot` is refused by this socket as foreign every
-/// single time — the two processes never agree on an id, and the join the
-/// cursor exists to protect is therefore broken between the CLI and the
-/// daemon.
+/// **The same id `sprout snapshot` mints against the same database**, because
+/// this is the same call: the derivation is `SproutInstance.forFeed` in
+/// `lib/protocol.dart` and no id is computed here. That is the point rather
+/// than a tidiness — an id computed here would be a second hash that has to
+/// stay equal to the CLI's, and two hashes that must agree is the bug rather
+/// than the repair. This function is plumbing; `bin/sprout.dart`'s
+/// `instanceForStore` is the identical one line.
 ///
-/// The fix is not to compute an id here. `bin/sprout.dart`'s `instanceOf`
-/// already derives a stable one from the absolute database path plus the
-/// identity of the feed's first event, and forking a second derivation that
-/// happens to agree today is the bug rather than the repair — two independent
-/// hashes that must stay equal will drift. The honest fix is lifting that
-/// derivation into `lib/protocol.dart` as `SproutInstance.forStore(...)` and
-/// calling it from both `bin/` and here. That is a file this leaf does not
-/// own, so it is reported rather than done, and `test/ws_test.dart` pins the
-/// current behaviour — a CLI-minted cursor is refused, with the CLI's own
-/// words — so the day it is fixed the test says so instead of staying quiet.
-SproutInstance get daemonInstance => SproutInstance.current;
+/// It used to be `SproutInstance.current`, generated per process, and that was
+/// finding F-01: a cursor a user copied out of `sprout snapshot` was refused
+/// by this socket as foreign every single time, so the join the whole protocol
+/// exists to protect was broken between the two surfaces sprout ships.
+/// `test/ws_test.dart` now asserts the acceptance, paired with a cursor from a
+/// genuinely different database that is still refused.
+///
+/// Derived per call, never cached at startup. While the feed is empty the id
+/// is the empty-feed one and it changes when the first event lands; a daemon
+/// that captured it at boot would disagree with the CLI for as long as it
+/// stayed up, which is the failure this whole change removes.
+SproutInstance daemonInstanceFor(SproutStore store) => SproutInstance.forFeed(
+  databasePath: store.databasePath,
+  firstEvent: store.firstEvent,
+);
 
 /// The opening frame: a whole snapshot, tagged so a consumer can tell it from
 /// the [ProtocolFrame]s that follow.

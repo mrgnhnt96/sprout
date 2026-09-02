@@ -37,6 +37,12 @@ const int defaultBatchSize = 500;
 /// start again. Passing null means "start from the head": no replay, an
 /// immediate `ready`, then live deltas only.
 ///
+/// [instance] is required and has no default. It names the feed these cursors
+/// belong to, and the caller derives it with `SproutInstance.forFeed` from the
+/// store it is watching, so a `watch` and a `snapshot` over the same database
+/// — in this process or another one — agree. The default that used to be here,
+/// `SproutInstance.current`, was per process and was finding F-01.
+///
 /// sproutd records nothing about what it sent. Watching twice from the same
 /// cursor replays the same events both times — the cursor belongs to the
 /// consumer, and having emitted a frame is not proof anyone took it.
@@ -49,15 +55,15 @@ const int defaultBatchSize = 500;
 Stream<ProtocolFrame> watchFrames({
   required WatchSource source,
   required WatchSignals signals,
+  required SproutInstance instance,
   String? since,
-  SproutInstance? instance,
   DateTime Function()? now,
   int batchSize = defaultBatchSize,
 }) => _WatchSession(
   source: source,
   signals: signals,
   since: since,
-  instance: instance ?? SproutInstance.current,
+  instance: instance,
   now: now ?? DateTime.now,
   batchSize: batchSize,
 ).frames;

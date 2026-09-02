@@ -12,6 +12,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+// The socket handler takes four parameters revali injects off the request
+// context by type; this test supplies them by hand.
+import 'package:revali_router/revali_router.dart' hide WebSocket;
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
@@ -221,8 +224,29 @@ void main() {
       // against one". What the socket does *after* that frame — and that it
       // stays open at all, which the stub did not — is `test/ws_test.dart`,
       // over a real server and a real client.
-      final first = await TreeController(store).events(null).first;
-      final frame = jsonDecode(first.value) as Map<String, Object?>;
+      //
+      // The frames arrive on the sender rather than on the returned stream:
+      // that stream is deliberately already done, so `HandleWebSocket` reaches
+      // the read loop that lets an inbound pong through (F-06).
+      final sent = <String>[];
+      final data = DataImpl();
+      final frames = TreeController(store).events(
+        null,
+        data,
+        CleanUpImpl(),
+        AsyncWebSocketSenderImpl<Stream<StringContent>>(
+          (pushed) => pushed.listen((frame) => sent.add(frame.value)),
+        ),
+        CloseWebSocketImpl((code, reason) async {}),
+      );
+      addTearDown(() => data.get<TreeSocketSession>()?.stop());
+
+      expect(await frames.isEmpty, isTrue, reason: 'already done, on purpose');
+      for (var i = 0; i < 20 && sent.isEmpty; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final frame = jsonDecode(sent.first) as Map<String, Object?>;
       expect(frame['type'], snapshotFrameType);
       expect(frame['nodes'], isEmpty);
     });

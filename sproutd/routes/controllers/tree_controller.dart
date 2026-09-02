@@ -60,25 +60,34 @@ const String socketClosedReasonPrefix = 'sprout: ';
 
 /// How often the socket asks its peer whether it is still there.
 ///
-/// **Not decoration — it is the only thing that ends a session.** While
-/// `runHandler(onConnect)` is streaming, `HandleWebSocket.execute()` has not
-/// reached `listenToMessages()`, so *nobody reads the socket*: an inbound
-/// close frame is never processed, `closeCode` stays null, and
-/// `webSocket.add` keeps succeeding into a peer that has gone. The ping is
-/// timer-driven rather than read-driven, so it notices anyway: `dart:io`
-/// closes the socket when a pong does not come back, which unwinds the
-/// handler and cancels both signals with it. Without one, **every client that
-/// hangs up leaks a watch session, its 15s heartbeat and its 250ms poll**, and
-/// nothing ever reclaims them.
+/// **It reclaims the peer that vanished without hanging up.** A client that
+/// closes its connection is now noticed by the read loop
+/// `HandleWebSocket.listenToMessages()` runs — see [TreeController.events]
+/// for why that loop is reachable at all — but a peer whose host disappeared
+/// leaves the connection ESTABLISHED with nothing ever arriving on it, and
+/// only an unanswered ping tells that apart from a client that is merely
+/// quiet. `dart:io` closes such a socket with 1001 after two intervals, which
+/// unwinds the handler and cancels both signals with it. Without the ping
+/// **that client leaks a watch session, its 15s heartbeat and its 250ms
+/// poll** and nothing ever reclaims them; `test/ws_test.dart` pins both the
+/// leak and the reclaim.
 ///
-/// Measured out of process against the compiled binary, run from `/`, with a
-/// client SIGKILLed so it sends a TCP FIN and no close frame: with no ping the
-/// daemon still held the connection ESTABLISHED after 60s; with this ping it
-/// closed the connection itself after 31s, one ping to discover the peer is
-/// gone and one to time the missing pong out.
+/// **A pong has to be able to cancel it, and for a while none could.**
+/// `dart:io` pauses the socket's protocol subscription the moment it is
+/// created and resumes it only when something listens to the `WebSocket`
+/// (`websocket_impl.dart`: `subscription.pause()`, and
+/// `_controller.onListen = subscription.resume`). A pong that is never
+/// delivered cannot reset the timer, so while the connect handler streamed —
+/// the one thing that keeps `listenToMessages()` out of reach — *every*
+/// socket was closed at twice this interval whether or not the client
+/// answered. That was finding F-06. Measured out of process against the
+/// compiled binary run from `/`, two clients in one run: before, a client
+/// sending well-formed masked pongs was closed 1001 at +30.0s exactly like a
+/// silent one; after, it is still carrying frames at +45.0s while the silent
+/// one is still closed at +30.0s.
 ///
-/// The type is the fix, and it is a workaround for a dependency bug rather
-/// than a design: see [PingDuration].
+/// The type is the fix for a different dependency bug, and it is a workaround
+/// rather than a design: see [PingDuration].
 const PingDuration socketPingInterval = PingDuration(seconds: 15);
 
 /// A [Duration] that survives `revali build`.
@@ -150,34 +159,56 @@ class TreeController {
 
   /// `ws://…/api/tree/events[?since=<cursor>]` — the long-lived socket.
   ///
-  /// **Two-way, and triggered on connect.** revali 3.3.2's
-  /// `createWebSocketHandler` registers `onConnect` only when
-  /// `triggerOnConnect` is true *or* the mode cannot receive, so a plain
-  /// `twoWay` socket would run nothing at all when a client attaches. And
-  /// `WebSocketMode.sendOnly` — what P1-06 shipped — makes
-  /// `HandleWebSocket.execute()` close the socket with 1000 the moment the
-  /// connect handler's stream completes, which for a handler returning a
-  /// single `Map` is immediately. Returning a `Stream` is what makes the
-  /// socket long-lived; `twoWay` is what leaves Phase 7's back channel on the
-  /// wire rather than off it.
+  /// **Two-way, triggered on connect, and it returns a stream that is already
+  /// done.** The empty stream is the load-bearing part of this method and it
+  /// is not an oversight. `HandleWebSocket.execute()` awaits
+  /// `runHandler(onConnect)` to completion *before* it calls
+  /// `listenToMessages()`, and `listenToMessages()` is the only place in
+  /// `revali_router 5.1.1` that ever listens to the `WebSocket`. A connect
+  /// handler that streams for the life of the session therefore leaves the
+  /// socket unread for the life of the session — which is what F-05 and F-06
+  /// both were, one unread socket seen from two sides. Completing at once
+  /// lets the read loop start; the frames go out through [AsyncWebSocketSender]
+  /// instead, which `HandleWebSocket` wires to the same `sendResponse` the
+  /// yielded ones went through, so nothing about the wire format changes.
   ///
-  /// One caveat, measured rather than assumed, and it belongs to Phase 7:
-  /// `execute()` awaits `runHandler(onConnect)` to completion *before*
-  /// `listenToMessages()`, so while this stream is running no inbound client
-  /// message is serviced. The mode is right and the channel is negotiated; a
-  /// steer arriving on it needs a revali-side change, not a mode change here.
+  /// `triggerOnConnect` is still required: revali 3.3.2's
+  /// `createWebSocketHandler` registers `onConnect` only when it is true *or*
+  /// the mode cannot receive, so a plain `twoWay` socket would run nothing at
+  /// all when a client attaches. `WebSocketMode.sendOnly` — what P1-06
+  /// shipped — is still wrong for a second reason now: it makes `execute()`
+  /// skip `listenToMessages()` entirely and close with 1000.
+  ///
+  /// The injected parameters are all resolved by `revali`'s generator from
+  /// their types (`create_param_arg.dart`, `create_web_socket_handler.dart`):
+  /// [sender] pushes frames, [close] ends the socket after the `bye`,
+  /// [cleanUp] drops the watch session when the request context closes, and
+  /// [data] is what makes an `onMessage` re-entry a no-op — revali registers
+  /// this same method as both callbacks, so without the guard every inbound
+  /// client message would open a second snapshot-and-watch on one socket.
+  /// Reading those messages is Phase 7's steer; what changes here is that the
+  /// channel carrying them is serviced at all.
   @WebSocket.ping(
     ping: socketPingInterval,
     path: 'events',
     mode: WebSocketMode.twoWay,
     triggerOnConnect: true,
   )
-  Stream<StringContent> events(@Query('since') String? since) =>
-      treeSocketFrames(
-        store: _store,
-        instance: daemonInstanceFor(_store),
-        since: since,
-      ).map((frame) => StringContent(jsonEncode(frame)));
+  Stream<StringContent> events(
+    @Query('since') String? since,
+    Data data,
+    CleanUp cleanUp,
+    AsyncWebSocketSender<Stream<StringContent>> sender,
+    CloseWebSocket close,
+  ) => attachTreeSocket(
+    store: _store,
+    instance: daemonInstanceFor(_store),
+    since: since,
+    data: data,
+    cleanUp: cleanUp,
+    sender: sender,
+    close: close,
+  );
 }
 
 /// The instance this daemon hands out cursors from.
@@ -329,4 +360,134 @@ Stream<Map<String, Object?>> treeSocketFrames({
     },
   );
   return out.stream;
+}
+
+/// Starts the socket's frames on [sender] and returns a stream that is already
+/// done.
+///
+/// The two halves are deliberate. The **returned stream** is what
+/// `HandleWebSocket.runHandler(onConnect)` awaits, and it completes at once so
+/// that `execute()` reaches `listenToMessages()` — the only `webSocket.listen`
+/// in `revali_router 5.1.1`, and therefore the only thing that un-pauses
+/// `dart:io`'s protocol subscription so an inbound **pong** is processed at
+/// all. The **frames** go out through [sender], which reaches the same
+/// `HandleWebSocket.sendResponse` a yielded frame did.
+///
+/// Order is preserved across the two: `sendResponse` queues on one
+/// `SequentialExecutor`, and each `send` reaches that queue after the same
+/// single microtask hop, so sends are enqueued in the order they were made.
+/// `test/ws_test.dart` asserts the resulting frame order over a real socket
+/// rather than leaving that to reasoning.
+///
+/// [data] carries the session for the life of the socket, which is what makes
+/// a second call — revali registers this handler as `onMessage` too — return
+/// an empty stream instead of opening a second watch. [cleanUp] runs when the
+/// request context closes, which is after `execute()` has returned and the
+/// socket is really gone.
+///
+/// [signals] and [now] are injected only by tests, exactly as in
+/// [treeSocketFrames].
+Stream<StringContent> attachTreeSocket({
+  required SproutStore store,
+  required SproutInstance instance,
+  required Data data,
+  required CleanUp cleanUp,
+  required AsyncWebSocketSender<Stream<StringContent>> sender,
+  required CloseWebSocket close,
+  String? since,
+  WatchSignals? signals,
+  DateTime Function()? now,
+}) {
+  // An inbound message, not a new connection. Answering it with a second
+  // snapshot-and-watch on the same socket is the failure this guards.
+  if (data.has<TreeSocketSession>()) {
+    return const Stream<StringContent>.empty();
+  }
+
+  final session = TreeSocketSession(sender: sender, close: close);
+  data.add<TreeSocketSession>(session);
+  cleanUp.add(session.stop);
+  session.pump(
+    treeSocketFrames(
+      store: store,
+      instance: instance,
+      since: since,
+      signals: signals,
+      now: now,
+    ),
+  );
+
+  return const Stream<StringContent>.empty();
+}
+
+/// One attached client: the subscription that produces its frames, and the
+/// close that ends it.
+///
+/// Held in the request's [Data] so the socket has exactly one of these however
+/// many times revali invokes the handler, and cancelled from the request's
+/// [CleanUp] so the watch session, its heartbeat and its poll go away with the
+/// connection rather than outliving it.
+final class TreeSocketSession {
+  /// Pushes through [sender] and ends through [close].
+  TreeSocketSession({required this.sender, required this.close});
+
+  /// Where a frame goes, one single-element stream at a time.
+  ///
+  /// The type argument is the handler's whole return type rather than its
+  /// element type, because that is what `revali` derives it from
+  /// (`create_web_socket_handler.dart`'s `_createAsyncWebSocketSender` reads
+  /// `returnType.nonAsyncType`, which strips `Future` and not `Stream`). The
+  /// generated adapter maps it through `StringContent.toJson()` exactly as it
+  /// maps a yielded frame, so `revali_router` sees a `Stream<String>`,
+  /// `StreamBodyData.read()` encodes it with `utf8.encoder` — one output
+  /// chunk per element — and one frame is still one WebSocket message. The
+  /// wire format is asserted in `test/ws_test.dart`, not assumed here.
+  final AsyncWebSocketSender<Stream<StringContent>> sender;
+
+  /// How the socket is ended once the stream has said its last word.
+  final CloseWebSocket close;
+
+  StreamSubscription<Map<String, Object?>>? _frames;
+  bool _closed = false;
+
+  /// Subscribes to [frames] and sends each one.
+  ///
+  /// [treeSocketFrames] ends by *erroring* with a [CloseWebSocketException]
+  /// carrying the code and the reason, which is how the close survives now
+  /// that `runHandler` is no longer the thing catching it. The `bye` that
+  /// precedes it is already enqueued when this runs: the send was made from
+  /// the previous `onData`, and a stream controller schedules the next event
+  /// only after that callback returns, so `HandleWebSocket.close` finds a
+  /// `sending` future to await rather than closing over the top of it.
+  void pump(Stream<Map<String, Object?>> frames) {
+    _frames = frames.listen(
+      (frame) => sender.send(Stream.value(StringContent(jsonEncode(frame)))),
+      onError: (Object error, StackTrace stackTrace) {
+        if (error case CloseWebSocketException(:final code, :final reason)) {
+          _end(code, reason);
+        } else {
+          _end(1011, '${socketClosedReasonPrefix}error');
+        }
+      },
+      onDone: () => _end(1000, '${socketClosedReasonPrefix}done'),
+    );
+  }
+
+  /// Cancels the frames, and with them the watch session and both its timers.
+  void stop() {
+    final subscription = _frames;
+    _frames = null;
+    unawaited(subscription?.cancel());
+  }
+
+  void _end(int code, String reason) {
+    // `onError` is followed by `onDone`, and both mean "closed"; the second
+    // one must not close a socket a later client already owns.
+    if (_closed) return;
+    _closed = true;
+    // `CloseWebSocket.close` is declared `void` on the interface even though
+    // `CloseWebSocketImpl` returns a future, so there is nothing to await:
+    // `HandleWebSocket.close` awaits the in-flight send itself.
+    close.close(code, reason);
+  }
 }

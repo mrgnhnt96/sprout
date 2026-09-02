@@ -393,38 +393,6 @@ void main() {
       expect(wire.received.last, bye.encodeLine());
     });
 
-    test('without a ping nothing notices a hang-up, which is why it is set', () {
-      // The negative control for the teardown above, and the only thing that
-      // shows the ping is what does the work rather than something else in
-      // the handler. With no ping the socket is never read while the connect
-      // handler is streaming, so a client that hung up two seconds ago is
-      // indistinguishable from one that is simply quiet — and the session, its
-      // 15s heartbeat and its 250ms poll stay alive forever.
-      //
-      // This was the generated route until F-03 was fixed; `the generated
-      // shape` group is what pins that it no longer is.
-      return _withWire((wire) async {
-        await wire.skipToReady();
-        await wire.socket.close();
-        // The same loop the test above tears down in, with the ping taken
-        // away and nothing else changed: heartbeats keep being sent into a
-        // socket whose peer left, and every one of them succeeds.
-        for (var i = 0; i < 20; i++) {
-          wire.heartbeats.add(null);
-          await Future<void>.delayed(const Duration(milliseconds: 100));
-        }
-        expect(
-          wire.wakeups.hasListener,
-          isTrue,
-          reason:
-              'a route built with no ping must still leak: if this fails the '
-              'teardown above is being caused by something other than the '
-              'ping, and that test no longer proves what it claims',
-        );
-        expect(wire.heartbeats.hasListener, isTrue);
-      }, ping: null);
-    });
-
     test('the client hanging up tears the session and its timers down', () {
       // The leak that is invisible for a day. `treeSocketFrames` is
       // StreamController-driven rather than `async*` precisely so this is
@@ -449,6 +417,159 @@ void main() {
         });
         expect(wire.wakeups.hasListener, isFalse);
         expect(wire.heartbeats.hasListener, isFalse);
+      });
+    });
+  });
+
+  group('the ping', () {
+    // These three do not share the group above's `wire`: two of them attach a
+    // client `dart:io` cannot be, and a group-level tearDown over a `late`
+    // field that a test never assigns fails on whatever ran last instead.
+    test('a client that answers the ping outlives twice the interval', () {
+      // Finding F-06, stated as the behaviour rather than as the defect.
+      //
+      // `dart:io` closes a socket with 1001 when a ping goes unanswered, and
+      // for a while *every* socket was closed that way whether the client
+      // answered or not: the protocol subscription is paused until something
+      // listens to the `WebSocket` (`websocket_impl.dart`:
+      // `subscription.pause()`, resumed by `_controller.onListen`), and while
+      // the connect handler streamed nothing ever did. A pong that is never
+      // delivered cannot cancel the timer. Measured on the compiled binary at
+      // a 15s ping: a client sending well-formed masked pongs was closed 1001
+      // at +30.0s, identically to one that sent nothing.
+      //
+      // `_Wire` listens, and `dart:io` answers a ping as soon as anything
+      // listens, so this client is the live peer. Six intervals is well past
+      // the two that used to be fatal.
+      return _withWire((wire) async {
+        await wire.skipToReady();
+        await Future<void>.delayed(_testPing * 6);
+
+        expect(
+          wire.socket.closeCode,
+          isNull,
+          reason:
+              'F-06: the socket was closed at twice the ping interval even '
+              'though the client answered every ping',
+        );
+        expect(wire.wakeups.hasListener, isTrue);
+        // Not merely unclosed — still carrying traffic. A socket that is open
+        // and no longer serviced is the failure this whole file exists for.
+        wire.heartbeats.add(null);
+        expect(
+          ProtocolFrame.decodeLine(await wire.next()),
+          isA<HeartbeatFrame>(),
+        );
+      });
+    });
+
+    test('a peer that never answers the ping is still reclaimed', () async {
+      // The pair, and the half that must not be lost to fix the half above. A
+      // silent client is the peer whose host vanished: the connection is still
+      // ESTABLISHED, nothing is wrong with it at the TCP level, and no close
+      // frame is ever coming. Only the ping notices.
+      final bound = await _bind(ping: _testPing);
+      final silent = await _silentClient(bound.server.port);
+      addTearDown(() async {
+        await silent.close();
+        await bound.dispose();
+      });
+
+      await _until(() => bound.wakeups.hasListener);
+      await _until(
+        () => !bound.wakeups.hasListener && !bound.heartbeats.hasListener,
+      );
+      // The close frame is written on its way out and arrives a moment after
+      // the session is dropped, so this waits rather than reads once.
+      await _until(() => silent.sawGoingAway);
+    });
+
+    test('with no ping that same peer is never noticed, which is the point', () {
+      // The negative control for the two above: it is what shows the ping is
+      // doing the work rather than something else in the handler. A hang-up is
+      // now seen by the read loop with or without a ping, so the control has to
+      // be the peer that never hangs up — which is exactly the case the ping
+      // was added for.
+      return _withBound((bound) async {
+        final silent = await _silentClient(bound.server.port);
+        addTearDown(silent.close);
+        await _until(() => bound.wakeups.hasListener);
+
+        // Well past the two intervals the test above is reclaimed in, with
+        // traffic flowing the whole time: every send into the abandoned peer
+        // succeeds, because nothing is wrong with the connection.
+        for (var i = 0; i < 20; i++) {
+          bound.heartbeats.add(null);
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+        expect(
+          bound.wakeups.hasListener,
+          isTrue,
+          reason:
+              'a route built with no ping must still leak: if this fails the '
+              'reclaim above is being caused by something other than the '
+              'ping, and that test no longer proves what it claims',
+        );
+        expect(bound.heartbeats.hasListener, isTrue);
+        expect(silent.closed, isFalse);
+      }, ping: null);
+    });
+  });
+
+  group('the back channel', () {
+    // Finding F-05, which was the same unread socket as F-06 seen from the
+    // other side: `HandleWebSocket.execute()` awaits `runHandler(onConnect)`
+    // to completion before it calls `listenToMessages()`, so on a socket whose
+    // connect handler streamed forever no inbound message was ever serviced.
+    // The connect handler now completes at once, so the read loop runs
+    // alongside the push — and that is a fact about the transport, not a
+    // steer: nothing in sproutd interprets a client message yet, which is
+    // Phase 7's work.
+    test('an inbound message is serviced while the server is pushing', () {
+      return _withWire((wire) async {
+        await wire.skipToReady();
+        expect(wire.handlerCalls, 1, reason: 'the connect, and nothing else');
+
+        wire.socket.add(utf8.encode('{"steer":"not yet"}'));
+        await _until(
+          () => wire.handlerCalls > 1,
+          timeout: const Duration(seconds: 5),
+        );
+
+        // Serviced *while* pushing: the socket is still the one streaming.
+        wire.heartbeats.add(null);
+        expect(
+          ProtocolFrame.decodeLine(await wire.next()),
+          isA<HeartbeatFrame>(),
+        );
+      });
+    });
+
+    test('and it does not open a second snapshot-and-watch', () {
+      // revali registers one closure as both `onConnect` and `onMessage`, so
+      // without the session guard in `attachTreeSocket` every client message
+      // would replay the whole protocol down the same socket.
+      return _withWire((wire) async {
+        await wire.skipToReady();
+        wire.socket
+          ..add(utf8.encode('{"steer":"one"}'))
+          ..add(utf8.encode('{"steer":"two"}'));
+        await _until(() => wire.handlerCalls >= 3);
+
+        wire.heartbeats.add(null);
+        expect(
+          ProtocolFrame.decodeLine(await wire.next()),
+          isA<HeartbeatFrame>(),
+          reason: 'the next frame must be the beat, not a second snapshot',
+        );
+        expect(
+          wire.received.where((line) => line.contains('"$snapshotFrameType"')),
+          hasLength(1),
+        );
+        expect(
+          wire.received.where((line) => line.contains('"ready"')),
+          hasLength(1),
+        );
       });
     });
   });
@@ -540,10 +661,26 @@ void main() {
       expect(RegExp(r'^\s*@SSE\b', multiLine: true).hasMatch(source), isFalse);
     });
 
-    test('the handler returns a Stream, which is what keeps it open', () {
+    test('the handler returns a Stream that is already done', () {
+      // Both halves matter and they pull in opposite directions. The return
+      // type has to be a `Stream` because that is what revali derives the
+      // injected `AsyncWebSocketSender`'s type argument from and what keeps
+      // the route a WebSocketRoute — and the stream has to be *empty*, because
+      // `execute()` awaits `runHandler(onConnect)` before it calls
+      // `listenToMessages()`, the only `webSocket.listen` in the package. A
+      // handler that streams for the life of the session leaves the socket
+      // unread for the life of the session, which is F-05 and F-06 both.
       final source = File('routes/controllers/tree_controller.dart')
           .readAsStringSync();
       expect(source, contains('Stream<StringContent> events('));
+      expect(
+        source,
+        contains('const Stream<StringContent>.empty()'),
+        reason:
+            'F-06: if the connect handler streams again, nothing reads the '
+            'socket, no pong is ever processed, and every client is closed '
+            'with 1001 at twice the ping interval whether it answers or not',
+      );
     });
 
     test('revali build agrees, when it has been run', () {
@@ -557,6 +694,18 @@ void main() {
       final source = generated.readAsStringSync();
       expect(source, contains('mode: WebSocketMode.twoWay'));
       expect(source, contains('onConnect:'));
+      // The four parameters revali resolves by type. The sender's type
+      // argument is the handler's whole return type and not its element type
+      // (`_createAsyncWebSocketSender` reads `returnType.nonAsyncType`, which
+      // strips `Future` and not `Stream`), so a signature written the obvious
+      // way emits code that does not compile — this is what catches that.
+      expect(source, contains('context.data,'));
+      expect(source, contains("expectedType: 'CleanUp'"));
+      expect(
+        source,
+        contains('AsyncWebSocketSenderImpl<Stream<StringContent>>'),
+      );
+      expect(source, contains('context.close,'));
       // StringContent.toJson() is the raw String, which is what puts NDJSON on
       // the wire instead of a {"data": …} envelope.
       expect(source, contains("yield* result.map((e) => e.toJson())"));
@@ -663,6 +812,19 @@ Future<void> _withStore(
   }
 }
 
+/// Binds a server with no client, runs [body] against it, and tears it down.
+Future<void> _withBound(
+  Future<void> Function(_Bound bound) body, {
+  Duration? ping = _testPing,
+}) async {
+  final bound = await _bind(ping: ping);
+  try {
+    await body(bound);
+  } finally {
+    await bound.dispose();
+  }
+}
+
 /// Serves one socket, runs [body] against it, and always tears it down.
 Future<void> _withWire(
   Future<void> Function(_Wire wire) body, {
@@ -684,12 +846,10 @@ Future<void> _withWire(
 /// same closure registered as both `onConnect` and `onMessage`, each
 /// `yield*`-ing the handler's stream mapped through `StringContent.toJson()`.
 /// See the `generated shape` group.
-Future<_Wire> _serve({
+Future<_Bound> _bind({
   SproutStore? store,
   void Function(SproutStore store)? seed,
-  Object? since,
   Duration? ping = _testPing,
-  Duration timeout = const Duration(seconds: 10),
 }) async {
   final owned = store == null;
   final db = store ?? SproutStore.memory();
@@ -708,12 +868,28 @@ Future<_Wire> _serve({
     shutdown: shutdown.future,
   );
 
-  Stream<String> handle(WebSocketContext context) => treeSocketFrames(
-    store: db,
-    instance: instance,
-    since: context.request.queryParameters['since'] as String?,
-    signals: signals,
-  ).map((frame) => StringContent(jsonEncode(frame)).toJson());
+  // Mirrors the generated call verbatim, injected parameters included: revali
+  // resolves `Data`, `CleanUp`, `AsyncWebSocketSender` and `CloseWebSocket`
+  // off the context by type (`create_param_arg.dart`,
+  // `create_web_socket_handler.dart`), and maps the handler's own stream
+  // through `StringContent.toJson()` whether it carries anything or not — and
+  // it now carries nothing, which is the whole of the F-06 fix.
+  var calls = 0;
+  Stream<String> handle(WebSocketContext context) {
+    calls++;
+    return attachTreeSocket(
+      store: db,
+      instance: instance,
+      since: context.request.queryParameters['since'] as String?,
+      signals: signals,
+      data: context.data,
+      cleanUp: context.data.get<CleanUp>()!,
+      sender: AsyncWebSocketSenderImpl<Stream<StringContent>>(
+        (data) => context.asyncSender.send(data.map((e) => e.toJson())),
+      ),
+      close: context.close,
+    ).map((e) => e.toJson());
+  }
 
   final router = Router(
     routes: [
@@ -755,44 +931,156 @@ Future<_Wire> _serve({
   final server = await HttpServer.bind('127.0.0.1', 0);
   unawaited(handleRouterRequests(server, router, router.close));
 
-  final sinceValue = switch (since) {
-    final String value => value,
-    final String Function(SproutInstance) build => build(instance),
-    _ => null,
-  };
-  final query = sinceValue == null
-      ? ''
-      : '?since=${Uri.encodeQueryComponent(sinceValue)}';
-  final socket = await WebSocket.connect(
-    'ws://127.0.0.1:${server.port}/api/tree/events$query',
-  );
-
-  return _Wire(
+  return _Bound(
     server: server,
-    socket: socket,
     store: db,
     ownsStore: owned,
     instance: instance,
     wakeups: wakeups,
     heartbeats: heartbeats,
     shutdown: shutdown,
-    timeout: timeout,
+    handlerCalls: () => calls,
   );
 }
 
-/// One connected client and everything the test needs to drive it.
-final class _Wire {
-  _Wire({
+/// A bound server with no client attached to it.
+///
+/// Split out of [_serve] because the two ping tests need a client `dart:io`
+/// cannot be: one that completes the handshake and then never answers a ping.
+final class _Bound {
+  _Bound({
     required this.server,
-    required this.socket,
     required this.store,
     required this.ownsStore,
     required this.instance,
     required this.wakeups,
     required this.heartbeats,
     required this.shutdown,
-    required this.timeout,
-  }) {
+    required this.handlerCalls,
+  });
+
+  final HttpServer server;
+  final SproutStore store;
+  final bool ownsStore;
+  final SproutInstance instance;
+  final StreamController<void> wakeups;
+  final StreamController<void> heartbeats;
+  final Completer<String> shutdown;
+
+  /// How many times the route handler has been invoked on this server.
+  ///
+  /// revali registers one closure as both `onConnect` and `onMessage`, so this
+  /// counts connects *and* inbound messages — which is what makes it able to
+  /// say whether an inbound message was serviced at all (F-05) and whether a
+  /// second one opened a second watch (it must not).
+  final int Function() handlerCalls;
+
+  /// Releases everything [_bind] created. Safe to call twice.
+  Future<void> dispose() async {
+    await server.close(force: true);
+    // NOT awaited. A single-subscription `StreamController.close()` completes
+    // only once a listener has taken the done event, and on the refusal path
+    // the watch session never subscribes to either signal — so awaiting these
+    // hangs forever, which surfaces as an unexplained tearDown timeout that
+    // hides the assertion the test was actually making.
+    unawaited(wakeups.close());
+    unawaited(heartbeats.close());
+    if (ownsStore) store.close();
+  }
+}
+
+/// Binds a server and connects a real `dart:io` client to it.
+Future<_Wire> _serve({
+  SproutStore? store,
+  void Function(SproutStore store)? seed,
+  Object? since,
+  Duration? ping = _testPing,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final bound = await _bind(store: store, seed: seed, ping: ping);
+
+  final sinceValue = switch (since) {
+    final String value => value,
+    final String Function(SproutInstance) build => build(bound.instance),
+    _ => null,
+  };
+  final query = sinceValue == null
+      ? ''
+      : '?since=${Uri.encodeQueryComponent(sinceValue)}';
+  final socket = await WebSocket.connect(
+    'ws://127.0.0.1:${bound.server.port}/api/tree/events$query',
+  );
+
+  return _Wire(bound: bound, socket: socket, timeout: timeout);
+}
+
+/// A client that completes the handshake by hand and then never answers a ping.
+///
+/// `dart:io`'s `WebSocket` answers a ping automatically as soon as anything
+/// listens to it, which is the live peer the fix is *for* and the opposite of
+/// what the reclaim test needs. This one reads every byte the server sends and
+/// replies to none of it: the connection stays ESTABLISHED, nothing is wrong
+/// with it at the TCP level, and only an unanswered ping can tell it apart
+/// from a client that is simply quiet.
+Future<_Silent> _silentClient(int port) async {
+  final socket = await Socket.connect('127.0.0.1', port);
+  final client = _Silent(socket);
+  socket.write(
+    'GET /api/tree/events HTTP/1.1\r\n'
+    'Host: 127.0.0.1:$port\r\n'
+    'Upgrade: websocket\r\n'
+    'Connection: Upgrade\r\n'
+    'Sec-WebSocket-Key: ${base64.encode(List<int>.generate(16, (i) => i))}\r\n'
+    'Sec-WebSocket-Version: 13\r\n\r\n',
+  );
+  await socket.flush();
+  await _until(() => client.handshook, timeout: const Duration(seconds: 5));
+  return client;
+}
+
+/// The bytes a [_silentClient] has been sent, and nothing else.
+final class _Silent {
+  _Silent(this.socket) {
+    socket.listen(_bytes.addAll, onDone: () => closed = true);
+  }
+
+  final Socket socket;
+  final List<int> _bytes = [];
+
+  /// True once the server has hung the connection up.
+  bool closed = false;
+
+  /// True once the 101 came back, so a later assertion is about the socket
+  /// rather than about a handshake that never happened.
+  bool get handshook =>
+      utf8.decode(_bytes, allowMalformed: true).startsWith('HTTP/1.1 101');
+
+  /// True once a close frame with code 1001 has arrived.
+  ///
+  /// Matched as raw bytes because there is no client library here: `0x88` is
+  /// FIN + opcode 8, `0x02` is a two-byte unmasked payload — a code and no
+  /// reason, which is what `dart:io` sends when a pong does not come back —
+  /// and `0x03E9` is 1001, `goingAway`.
+  bool get sawGoingAway {
+    for (var i = 0; i + 3 < _bytes.length; i++) {
+      if (_bytes[i] == 0x88 &&
+          _bytes[i + 1] == 0x02 &&
+          _bytes[i + 2] == 0x03 &&
+          _bytes[i + 3] == 0xE9) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> close() async {
+    socket.destroy();
+  }
+}
+
+/// One connected client and everything the test needs to drive it.
+final class _Wire {
+  _Wire({required this.bound, required this.socket, required this.timeout}) {
     _subscription = socket.listen(
       (message) {
         // Every message arrives as a BINARY frame, never text:
@@ -812,15 +1100,19 @@ final class _Wire {
     );
   }
 
-  final HttpServer server;
+  final _Bound bound;
   final WebSocket socket;
-  final SproutStore store;
-  final bool ownsStore;
-  final SproutInstance instance;
-  final StreamController<void> wakeups;
-  final StreamController<void> heartbeats;
-  final Completer<String> shutdown;
   final Duration timeout;
+
+  HttpServer get server => bound.server;
+  SproutStore get store => bound.store;
+  SproutInstance get instance => bound.instance;
+  StreamController<void> get wakeups => bound.wakeups;
+  StreamController<void> get heartbeats => bound.heartbeats;
+  Completer<String> get shutdown => bound.shutdown;
+
+  /// See [_Bound.handlerCalls].
+  int get handlerCalls => bound.handlerCalls();
 
   /// Every message the client has received, in order.
   final List<String> received = [];
@@ -890,14 +1182,6 @@ final class _Wire {
     // whatever the test actually asserted.
     await socket.close();
     unawaited(_subscription.cancel());
-    await server.close(force: true);
-    // NOT awaited. A single-subscription `StreamController.close()` completes
-    // only once a listener has taken the done event, and on the refusal path
-    // the watch session never subscribes to either signal — so awaiting these
-    // hangs forever, which surfaces as an unexplained tearDown timeout that
-    // hides the assertion the test was actually making.
-    unawaited(wakeups.close());
-    unawaited(heartbeats.close());
-    if (ownsStore) store.close();
+    await bound.dispose();
   }
 }

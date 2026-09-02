@@ -1,4 +1,5 @@
-/// What the socket actually delivers, and what it takes to read it.
+/// What the socket delivered **before F-09 was fixed**, and what it takes to
+/// read it.
 ///
 /// Every byte here was captured off `ws://127.0.0.1/api/tree/events` from the
 /// **compiled** daemon run from `/`, while the **compiled** CLI seeded the
@@ -6,6 +7,17 @@
 /// through a stand-in for `claude`. The capture client decoded nothing: it
 /// wrote each message's bytes to `live_wire.bin` and each message's length to
 /// `live_wire.sizes`, so the boundaries are the daemon's and not a test's.
+///
+/// **This is a recording of how the server used to behave, and it is kept on
+/// purpose.** The daemon now newline-delimits every frame
+/// (`sproutd/routes/controllers/tree_controller.dart`), so a fresh capture
+/// would carry a `\n` between frames and these byte counts would not
+/// reproduce. That is not a reason to re-record it. It is the only evidence in
+/// the repo of a stream with *no* delimiter at all, and [FrameReader] must
+/// keep reading one — a client can be pointed at an older daemon, and a reader
+/// that only works on a delimited stream would fail there silently, rendering
+/// the empty tree it opened with. Nothing here asserts what the server does
+/// today; `sproutd/test/ws_test.dart` does that against a live socket.
 library;
 
 import 'dart:convert';
@@ -23,7 +35,8 @@ void main() {
     test('is a real capture: 112 messages, none over a chunk', () {
       // The claim the rest of this file rests on, asserted rather than
       // described. A capture whose messages happened to be small would let the
-      // reassembler pass without ever being needed.
+      // reassembler pass without ever being needed. Past tense throughout:
+      // this describes the recording, not the daemon on this branch.
       expect(wire.messages.length, 112);
       expect(wire.bytes.length, 86144);
       expect(wire.messages.map((m) => m.length).reduce(max), daemonChunkBytes);
@@ -31,8 +44,10 @@ void main() {
         wire.messages.where((m) => m.length == daemonChunkBytes).length,
         63,
         reason:
-            'the daemon chops at exactly $daemonChunkBytes bytes because '
-            "dart:convert's utf8 encoder flushes a 1024-byte buffer",
+            'the daemon chopped at exactly $daemonChunkBytes bytes because '
+            "dart:convert's utf8 encoder flushes a 1024-byte buffer — it "
+            'still does, the newline it now writes is chopped along with '
+            'everything else',
       );
     });
 
@@ -125,10 +140,12 @@ void main() {
     });
 
     test(
-      'whitespace between frames is skipped, so NDJSON would still work',
+      'whitespace between frames is skipped, which is how NDJSON is read',
       () {
-        // The transport sends no delimiter today. If it ever sends one — which
-        // is what `docs/02-open-findings.md` recommends — this keeps reading.
+        // This is the path the live transport takes now: F-09 is fixed and the
+        // daemon writes a `\n` after every frame, which arrives here as
+        // whitespace at depth zero. The fixture above is the other case — a
+        // stream with nothing between the objects — and both must read.
         final reader = FrameReader();
         const line = '{"type":"ready","cursor":"s1.aaaaaaaaaaaaaaaa.1"}';
         expect(reader.add(utf8.encode('$line\n$line\n')), hasLength(2));

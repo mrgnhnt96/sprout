@@ -17,39 +17,6 @@ are quoted in the entry.
 
 ## Open
 
-### F-09 — A frame over 1024 bytes is sent as several WebSocket messages, with no delimiter
-
-**Status: OPEN. BLOCKING nothing — P3-04 works around it in the client — but the fix belongs on
-the server.** Found by the P3-04 Crawler, measured against the compiled daemon run from `/`.
-**Fix lives in** `sproutd/routes/controllers/tree_controller.dart`, which P3-04 did not own.
-
-`TreeSocketSession.pump` sends `Stream.value(StringContent(jsonEncode(frame)))`. `revali_router`
-5.1.1 turns that into a `Stream<String>`, `StreamBodyData.read()` encodes it with `utf8.encoder`,
-and `dart:convert`'s `_Utf8Encoder` flushes a **1024-byte** buffer (`_DEFAULT_BYTE_BUFFER_SIZE`,
-Dart SDK 3.13 `lib/convert/utf.dart`). `HandleWebSocket.sendResponse` hands each chunk to
-`webSocket.add`, and `dart:io` sends one message per call. So **one frame is not one message**, and
-because `encodeLine()` writes no trailing newline there is nothing in the byte stream marking where
-one frame ends and the next begins.
-
-Measured, 45 seconds attached to a real `sprout run`: **112 messages, 63 of them exactly 1024 bytes,
-none larger, carrying 49 frames.** A client reading one message as one frame decodes 10 of the 112
-and throws on the other 102 — **39 of the 49 frames lost, including every delta that carries a
-subagent**, because the payload of a `frame.assistant` event is a whole Claude Code frame. The
-capture is committed at `sprout_ui/test/fixtures/live_wire.{bin,sizes}` and
-`sprout_ui/test/wire_test.dart` asserts all of the above.
-
-The doc comment on `TreeSocketSession.sender` says *"one frame is still one WebSocket message"*.
-That is false above a kilobyte. `sproutd/test/ws_test.dart` reads one message as one frame and
-passes because every frame it produces is smaller than a chunk — the assumption has never been
-tested against a real payload.
-
-The client-side repair is in `sprout_ui/lib/src/frame_reader.dart`: buffer bytes and scan for the
-end of each top-level JSON object. It is correct and it is tested, but it is the wrong place for
-it. The server-side repair is one character — send `'${jsonEncode(frame)}\n'` — which makes the
-byte stream the NDJSON the protocol says it is and lets every consumer split on a newline. Note it
-would change what `ws_test.dart:596` compares (`ProtocolFrame.decodeLine(beat).encodeLine()` against
-`beat`), so it is a real edit to that suite rather than a one-liner.
-
 ### F-10 — A node written with `putNode` never reaches the feed, so a root cannot be built from deltas
 
 **Status: OPEN. It is the root-shaped half of F-02.** Found by the P3-04 Crawler, measured.

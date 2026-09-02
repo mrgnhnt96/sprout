@@ -45,21 +45,33 @@ class WireFormatException implements Exception {
 /// each message to [ProtocolFrame.decodeLine] would have thrown on all 44 of
 /// them and rendered the empty snapshot it opened with, forever.
 ///
-/// `sproutd/test/ws_test.dart` reads one message as one frame and passes,
-/// because every frame those tests produce is smaller than a chunk. The
-/// assumption has simply never been tested against a real payload; see
-/// `docs/02-open-findings.md`.
+/// `sproutd/test/ws_test.dart` used to read one message as one frame and pass,
+/// because every frame those tests produce is smaller than a chunk — the blind
+/// spot that let this survive two phases. Its client now reassembles the same
+/// way this one does, and `a frame larger than one chunk` there builds a frame
+/// past [daemonChunkBytes] on purpose so the assumption is tested rather than
+/// relied on.
 ///
-/// **There is no delimiter to split on.** The transport sends
-/// `jsonEncode(frame)` with no trailing newline
-/// (`routes/controllers/tree_controller.dart`), so the stream is JSON objects
-/// concatenated end to end. This scans for the end of each one by tracking
-/// brace depth outside string literals — at the *byte* level, which is exact
-/// rather than approximate: `{`, `}`, `"` and `\` are ASCII, and every byte of
-/// a multi-byte UTF-8 sequence has its high bit set, so a character can never
-/// be mistaken for a delimiter. That also means a chunk boundary landing in
-/// the middle of a character costs nothing, because nothing is decoded until a
-/// whole object is in hand.
+/// **There is a delimiter now, and this reader is still required.** F-09 is
+/// fixed: `TreeSocketSession.pump`
+/// (`sproutd/routes/controllers/tree_controller.dart`) sends
+/// `'${jsonEncode(frame)}\n'`, so the byte stream really is the NDJSON the
+/// protocol always claimed. What that does **not** change is the chunking
+/// above — the newline is inside the string that gets cut at
+/// [daemonChunkBytes], so a frame still crosses messages and a client still
+/// has to buffer across them. The delimiter makes reassembly possible, not
+/// unnecessary.
+///
+/// This scans for the end of each object by tracking brace depth outside
+/// string literals rather than splitting on the newline, and it stays that way
+/// for two reasons: it reads a **pre-F-09 stream too**, which is what
+/// `test/fixtures/live_wire.{bin,sizes}` is a recording of, and it is exact at
+/// the *byte* level — `{`, `}`, `"` and `\` are ASCII, and every byte of a
+/// multi-byte UTF-8 sequence has its high bit set, so a character can never be
+/// mistaken for a delimiter. That also means a chunk boundary landing in the
+/// middle of a character costs nothing, because nothing is decoded until a
+/// whole object is in hand. The newline between frames is skipped as
+/// whitespace at depth zero.
 ///
 /// It never silently swallows. A byte that cannot begin an object throws
 /// [WireFormatException] rather than being buffered until the end of time,
@@ -113,8 +125,9 @@ class FrameReader {
       _scanned++;
       if (_depth == 0) {
         if (_isWhitespace(byte)) {
-          // Skipped rather than rejected. The transport sends no delimiter
-          // today; if it ever sends NDJSON properly this keeps working.
+          // Where the NDJSON delimiter is consumed. Skipped rather than
+          // required, so the same reader handles a pre-F-09 stream with no
+          // delimiter at all — which the committed fixture is.
           _buffer.removeRange(0, _scanned);
           _scanned = 0;
           continue;

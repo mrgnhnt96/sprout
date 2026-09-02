@@ -64,7 +64,7 @@ Three pieces, and only the third needs a browser:
 
 | | |
 |---|---|
-| `lib/src/frame_reader.dart` | bytes → whole frames. **One WebSocket message is not one frame** — see F-09. |
+| `lib/src/frame_reader.dart` | bytes → whole frames. **One WebSocket message is still not one frame** — the daemon now newline-delimits (F-09, fixed), but the encoder still chops at 1024 bytes, so a client must buffer across messages. |
 | `lib/src/live_tree.dart` | one snapshot + every delta → the world. Pure; no DOM, no clock. |
 | `lib/src/tree_socket.dart` | the browser's `WebSocket`, with `binaryType = 'arraybuffer'`. |
 
@@ -75,7 +75,13 @@ print the same words about the same node. That is why the board is testable with
 ### Reproducing the capture the tests run on
 
 `test/fixtures/live_wire.{bin,sizes}` is a real attach to a real daemon, recorded byte for byte
-with the message boundaries the daemon used. To take another:
+with the message boundaries the daemon used. It was taken **before F-09 was fixed**, so it carries
+no delimiter between frames at all, and it is kept that way deliberately — `FrameReader` has to
+keep reading an older daemon, and `wire_test.dart` says so. A capture taken today will differ:
+every frame now ends with a `\n`, so the byte total and the per-message sizes will not match the
+numbers `wire_test.dart` asserts. Write a new capture to a new name rather than over that one.
+
+To take another:
 
 ```bash
 # 1. Build the CLI and the daemon (sproutd/README.md has the five-step pipeline).

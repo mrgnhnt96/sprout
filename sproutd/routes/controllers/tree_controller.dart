@@ -441,11 +441,30 @@ final class TreeSocketSession {
   /// element type, because that is what `revali` derives it from
   /// (`create_web_socket_handler.dart`'s `_createAsyncWebSocketSender` reads
   /// `returnType.nonAsyncType`, which strips `Future` and not `Stream`). The
-  /// generated adapter maps it through `StringContent.toJson()` exactly as it
-  /// maps a yielded frame, so `revali_router` sees a `Stream<String>`,
-  /// `StreamBodyData.read()` encodes it with `utf8.encoder` — one output
-  /// chunk per element — and one frame is still one WebSocket message. The
-  /// wire format is asserted in `test/ws_test.dart`, not assumed here.
+  /// generated adapter maps it through `StringContent.toJson()`, which returns
+  /// the string unchanged (`revali_core 3.2.0`), exactly as it maps a yielded
+  /// frame. So `revali_router` sees a `Stream<String>`.
+  ///
+  /// **One frame is NOT one WebSocket message, and no change here can make it
+  /// one.** `StreamBodyData.read()` encodes that stream with `utf8.encoder`,
+  /// and `dart:convert`'s `_Utf8Encoder` flushes a **1024-byte** buffer
+  /// (`_DEFAULT_BYTE_BUFFER_SIZE`, Dart SDK 3.13 `lib/convert/utf.dart`)
+  /// whenever it fills — the element boundaries the sender was given are gone
+  /// by then. `HandleWebSocket.sendResponse` hands each flushed chunk to
+  /// `webSocket.add` and `dart:io` sends one message per call, so a frame over
+  /// a kilobyte arrives as several messages and several small frames can share
+  /// one. Measured against the compiled daemon run from `/`: an 80KB delta
+  /// crossed 80 messages, 79 of them exactly 1024 bytes.
+  ///
+  /// What [pump] guarantees instead is that the **byte stream** is NDJSON: a
+  /// newline follows every frame, so a consumer that buffers across messages
+  /// and splits on `\n` recovers every frame whatever the chunking did. That
+  /// is finding F-09, and before it the stream carried no delimiter at all —
+  /// concatenated JSON objects that could only be separated by re-parsing.
+  /// `sprout_ui/lib/src/frame_reader.dart` is still required on the client
+  /// for the buffering half; the delimiter is what makes it correct rather
+  /// than heuristic. The wire format is asserted in `test/ws_test.dart`, whose
+  /// client reassembles the same way a real consumer must.
   final AsyncWebSocketSender<Stream<StringContent>> sender;
 
   /// How the socket is ended once the stream has said its last word.
@@ -454,7 +473,17 @@ final class TreeSocketSession {
   StreamSubscription<Map<String, Object?>>? _frames;
   bool _closed = false;
 
-  /// Subscribes to [frames] and sends each one.
+  /// Subscribes to [frames] and sends each one, newline-terminated.
+  ///
+  /// **The `\n` is the delimiter, and it is added here rather than in
+  /// `encodeLine`.** The name of `ProtocolFrame.encodeLine` promises a line
+  /// and its body is `jsonEncode(toJson())`, so moving the newline in there
+  /// looks tidier — but `bin/sprout.dart` writes those with `out.writeln`,
+  /// which would then emit a blank line between every frame of
+  /// `sprout watch --json`, and roughly fifteen assertions across four suites
+  /// compare `encodeLine()` output directly. The transport is what owes a
+  /// delimiter, so the transport is where it is paid. See [sender] for why
+  /// this still does not make one frame one message.
   ///
   /// [treeSocketFrames] ends by *erroring* with a [CloseWebSocketException]
   /// carrying the code and the reason, which is how the close survives now
@@ -465,7 +494,8 @@ final class TreeSocketSession {
   /// `sending` future to await rather than closing over the top of it.
   void pump(Stream<Map<String, Object?>> frames) {
     _frames = frames.listen(
-      (frame) => sender.send(Stream.value(StringContent(jsonEncode(frame)))),
+      (frame) =>
+          sender.send(Stream.value(StringContent('${jsonEncode(frame)}\n'))),
       onError: (Object error, StackTrace stackTrace) {
         if (error case CloseWebSocketException(:final code, :final reason)) {
           _end(code, reason);

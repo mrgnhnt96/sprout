@@ -7,11 +7,14 @@
 ///
 /// A fixture that stored only the bytes would let a reader be tested against
 /// boundaries the daemon never produces. The daemon chops a frame at 1024
-/// bytes and sends each piece as its own message, so where the boundaries fall
-/// is the whole hazard.
+/// bytes and sends each piece as its own message — it still does, F-09 changed
+/// only what is *between* the frames — so where the boundaries fall is the
+/// whole hazard.
 ///
 /// The captures were taken by a client that decoded nothing: it wrote what
-/// arrived. Reproducing one is five commands, in `sprout_ui/README.md`.
+/// arrived, from a daemon predating F-09's fix, so there is no delimiter
+/// anywhere in these bytes. See `wire_test.dart` for why they are kept that
+/// way. Reproducing one is five commands, in `sprout_ui/README.md`.
 library;
 
 import 'dart:io';

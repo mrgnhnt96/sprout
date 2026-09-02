@@ -51,3 +51,58 @@ copying that decoder here would be F-01 again. It cannot import them today:
 `build_web_compilers` responds by **skipping the entrypoint and exiting 0** — a green build with no
 JavaScript in it. See `F-07` in `docs/02-open-findings.md` for the trace and the proposed split.
 `test/payload_test.dart` is what makes that failure loud instead of silent.
+
+## The live tree (P3-04)
+
+The page attaches once to `ws://<origin>/api/tree/events`, with no `--since`, and never
+re-snapshots. The socket opens with a `snapshot`; everything after it is a delta against that
+cursor. Re-snapshotting to stay current would hide exactly the defects that made deltas sufficient
+— F-01 (a cursor from one surface refused by the other) and F-02 (subagent creation not reaching
+the feed).
+
+Three pieces, and only the third needs a browser:
+
+| | |
+|---|---|
+| `lib/src/frame_reader.dart` | bytes → whole frames. **One WebSocket message is not one frame** — see F-09. |
+| `lib/src/live_tree.dart` | one snapshot + every delta → the world. Pure; no DOM, no clock. |
+| `lib/src/tree_socket.dart` | the browser's `WebSocket`, with `binaryType = 'arraybuffer'`. |
+
+`App.lines` renders the board as a list of strings, and every node line is `SnapshotNode.render` —
+**the protocol's own rendering**, so `sprout snapshot` on a terminal and this page in a browser
+print the same words about the same node. That is why the board is testable without a browser.
+
+### Reproducing the capture the tests run on
+
+`test/fixtures/live_wire.{bin,sizes}` is a real attach to a real daemon, recorded byte for byte
+with the message boundaries the daemon used. To take another:
+
+```bash
+# 1. Build the CLI and the daemon (sproutd/README.md has the five-step pipeline).
+cd ../sproutd && dart compile exe bin/sprout.dart -o build/sprout
+dart run revali build && dart compile exe .revali/server/server.dart -o build/sproutd
+
+# 2. Run the daemon from / against a fresh database, so relocatability is exercised too.
+export SPROUT_DB=/tmp/sprout-demo/sprout.db SPROUT_PORT=8794
+(cd / && "$PWD/build/sproutd") &
+
+# 3. Attach BEFORE anything runs, so the tree is built from deltas and nothing else.
+cd ../sprout_ui && dart run tool/headless_board.dart ws://127.0.0.1:8794/api/tree/events 40 &
+
+# 4. Seed it: a stand-in for `claude` that cats a Phase 0 capture with a root and two subagents.
+../sproutd/build/sprout run "map the repo and delegate two probes" \
+    --claude <a script that cats docs/research/fixtures/phase0/streams/B.ndjson> \
+    --db "$SPROUT_DB"
+```
+
+### Verifying the rendering, honestly
+
+**There is no browser on the machine this was built on, so no paint was observed.** What was:
+
+- the headers off the wire — `/` is `text/html`, `/main.css` is `text/css`,
+  `/main.client.dart.js` is `text/javascript`, and none of the three carries a
+  `content-disposition` (the `MemoryFile` trap P3-03 recorded);
+- the served bundle carries the protocol's own string literals, which dart2js keeps only for code
+  it cannot prove unreachable — `test/payload_test.dart` asserts them;
+- `tool/headless_board.dart`, which runs the same `FrameReader`, `LiveTree` and `App.lines` the
+  bundle is compiled from against a real socket, and prints the board every time it changes.

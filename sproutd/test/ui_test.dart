@@ -91,7 +91,12 @@ void main() {
       final js = utf8.decode(UiAssets.embedded.bytesFor(bundleName)!);
       // dart2js minifies identifiers and keeps string literals, so the app's
       // own copy is a fingerprint a stale or empty bundle would not carry.
-      expect(js, contains('The UI payload is served'));
+      // These come from `package:sprout_protocol`, in code dart2js keeps only
+      // because the UI really decodes and renders frames (P3-04): a binary
+      // embedding the pre-P3-04 stub fails here rather than serving a page
+      // that attaches to nothing.
+      expect(js, contains('NONE SCHEDULED'));
+      expect(js, contains('unknown frame type'));
       expect(js.length, greaterThan(10000));
     });
 

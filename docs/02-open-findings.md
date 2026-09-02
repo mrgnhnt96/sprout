@@ -17,6 +17,75 @@ are quoted in the entry.
 
 ## Open
 
+### F-09 — A frame over 1024 bytes is sent as several WebSocket messages, with no delimiter
+
+**Status: OPEN. BLOCKING nothing — P3-04 works around it in the client — but the fix belongs on
+the server.** Found by the P3-04 Crawler, measured against the compiled daemon run from `/`.
+**Fix lives in** `sproutd/routes/controllers/tree_controller.dart`, which P3-04 did not own.
+
+`TreeSocketSession.pump` sends `Stream.value(StringContent(jsonEncode(frame)))`. `revali_router`
+5.1.1 turns that into a `Stream<String>`, `StreamBodyData.read()` encodes it with `utf8.encoder`,
+and `dart:convert`'s `_Utf8Encoder` flushes a **1024-byte** buffer (`_DEFAULT_BYTE_BUFFER_SIZE`,
+Dart SDK 3.13 `lib/convert/utf.dart`). `HandleWebSocket.sendResponse` hands each chunk to
+`webSocket.add`, and `dart:io` sends one message per call. So **one frame is not one message**, and
+because `encodeLine()` writes no trailing newline there is nothing in the byte stream marking where
+one frame ends and the next begins.
+
+Measured, 45 seconds attached to a real `sprout run`: **112 messages, 63 of them exactly 1024 bytes,
+none larger, carrying 49 frames.** A client reading one message as one frame decodes 10 of the 112
+and throws on the other 102 — **39 of the 49 frames lost, including every delta that carries a
+subagent**, because the payload of a `frame.assistant` event is a whole Claude Code frame. The
+capture is committed at `sprout_ui/test/fixtures/live_wire.{bin,sizes}` and
+`sprout_ui/test/wire_test.dart` asserts all of the above.
+
+The doc comment on `TreeSocketSession.sender` says *"one frame is still one WebSocket message"*.
+That is false above a kilobyte. `sproutd/test/ws_test.dart` reads one message as one frame and
+passes because every frame it produces is smaller than a chunk — the assumption has never been
+tested against a real payload.
+
+The client-side repair is in `sprout_ui/lib/src/frame_reader.dart`: buffer bytes and scan for the
+end of each top-level JSON object. It is correct and it is tested, but it is the wrong place for
+it. The server-side repair is one character — send `'${jsonEncode(frame)}\n'` — which makes the
+byte stream the NDJSON the protocol says it is and lets every consumer split on a newline. Note it
+would change what `ws_test.dart:596` compares (`ProtocolFrame.decodeLine(beat).encodeLine()` against
+`beat`), so it is a real edit to that suite rather than a one-liner.
+
+### F-10 — A node written with `putNode` never reaches the feed, so a root cannot be built from deltas
+
+**Status: OPEN. It is the root-shaped half of F-02.** Found by the P3-04 Crawler, measured.
+**Fix lives in** `sproutd/lib/src/runner/session_runner.dart` and/or
+`sproutd/lib/src/store/sprout_store.dart`, which P3-04 did not own.
+
+F-02 made *subagent* creation reach the feed: `StoreProjection._syncSubagents` appends
+`runner.observed` beside the row it writes, so a consumer holding a snapshot plus every delta since
+learns the node exists without re-snapshotting. The root has no counterpart.
+`SessionRunner.launch` calls `store.putNode(...)` and appends nothing; `SproutStore.putNode` writes
+a row and never touches the feed. `runner.spawned` follows, but it carries a pid, a command line
+and a budget — not a node row, and deriving `current_task` from the launch's argv would be a guess.
+`LiveSession._markRoot` changes the root's status the same silent way.
+
+Measured: a client attached to a fresh daemon, then a `sprout run` started, ends with **both**
+subagents rendering correctly and the root known only as an id with 119 events against it. The UI
+shows it as `? · <id> · not described on this stream · 119 events` rather than dropping it —
+`LiveTree.strangers` — because an id sprout is emitting events about is a real node and hiding it
+would report a smaller tree than exists. But the honest board is still missing the root's project,
+task and status.
+
+The fix is an event beside the row, exactly as F-02 did for subagents.
+`sprout_ui/test/kinds_test.dart` fails the day one is added, and says so in its reason.
+
+### F-11 — `runner.observed` / `runner.updated` are wire vocabulary that lives in `sproutd`
+
+**Status: OPEN, low cost, high leverage.** Found by the P3-04 Crawler. **Fix lives in**
+`sprout_protocol/lib/` and `sproutd/lib/src/runner/projection.dart`.
+
+Those two `kind` strings travel over the socket and a browser branches on them, which makes them
+part of the protocol — but they are declared in `sproutd`, which `sprout_ui` cannot import at all
+(F-07: `package:sproutd` reaches `dart:io` and `dart:ffi`). So `sprout_ui/lib/src/live_tree.dart`
+spells them a second time. That is the shape of F-01, and the mitigation is F-01's own lesson:
+`sprout_ui/test/kinds_test.dart` reads the producer's source and fails if the strings or the payload
+shapes drift. Moving the constants into `sprout_protocol` removes the duplication entirely.
+
 ### F-08 — The rule-file guard reads command text, so an interpreter heredoc walks past it
 
 **Status: OPEN, and it is game_loop's to fix, not sprout's.** Found this session, by the P3-02

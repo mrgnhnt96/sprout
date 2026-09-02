@@ -1,0 +1,1 @@
+{"type":"bye","cursor":"s1.b178f79c15bc58b0.131","reason":"refused","detail":"cursor belongs to sproutd instance deadbeefdeadbeef, but this is instance b178f79c15bc58b0 — its position is meaningless here; take a fresh snapshot"}

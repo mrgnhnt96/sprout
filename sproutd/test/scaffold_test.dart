@@ -45,6 +45,15 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// because it reads a session it did not spawn — that is the whole point of
 /// watching from outside — and because nothing in it may ever act on what it
 /// finds, which is easier to keep true of a library than of a corner of one.
+///
+/// `watchdog` is P6-02's: the loop that runs `liveness` on a schedule, decides
+/// when a verdict is worth a human's attention, and rings. Separate from
+/// `liveness` because the two answer different questions — one measures, the
+/// other decides — and because the never-act rule has to be true of *both*
+/// independently. `test/watchdog_test.dart` greps this area's source for a
+/// kill or a signal exactly as `test/liveness_test.dart` greps that one, and
+/// two areas means two guards rather than one guard covering whichever files
+/// happened to sit beside it.
 const libraries = {
   'store',
   'stream',
@@ -55,6 +64,7 @@ const libraries = {
   'watch',
   'ui',
   'liveness',
+  'watchdog',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

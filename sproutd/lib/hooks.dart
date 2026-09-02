@@ -22,10 +22,14 @@
 /// carrying its whole payload, and an event name this build does not know keeps
 /// its spelling and records as `hook.unknown`.
 ///
-/// Implementation lives under `lib/src/hooks/`. Start at [HookRecord].
+/// Implementation lives under `lib/src/hooks/`. Start at [HookRecord] for the
+/// parse and [HookProjection] for the fold into the store.
 ///
-/// This library reads; it writes nothing. Folding these payloads into the store
-/// is P8-02's.
+/// The two halves are deliberately separable: [HookRecord.parse] is a pure
+/// function over bytes with no store, no clock and no filesystem, and
+/// [HookProjection] is the only thing here that writes. A gate that only needs
+/// to *read* a payload — the `PreToolUse` deny path — takes the first without
+/// the second.
 library;
 
 export 'package:sprout_protocol/values.dart'
@@ -49,3 +53,5 @@ export 'package:sprout_protocol/values.dart'
 
 export 'src/hooks/payload.dart'
     show HookPayload, HookRecord, MalformedHookPayload;
+export 'src/hooks/projection.dart'
+    show HookProjection, hookNodeIdPrefix, unknownHookProject;

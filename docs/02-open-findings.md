@@ -68,35 +68,95 @@ the grant, and produced the log entry. Same file, same content, same session, sa
 interpreter path is unguarded and the shell path is guarded. That is the gap in one pair of runs,
 and it is why the remedy has to be detection on the file rather than more parsing of the command.
 
-### F-14 — Two independent hook-payload parsers now exist, and they agree by coincidence
+---
 
-**Status: OPEN, and it is P8-02's to close** — that is the leaf which will need one of them and is
-the first that can pick without guessing.
+### F-16 — A session sprout spawned itself is recorded TWICE when the hooks are installed
 
-P8-01 added `HookPayload` in `sproutd/lib/src/hooks/payload.dart`, the general parser for every hook
-event. `UserPromptSubmitPayload` in `sproutd/lib/src/stream/prompt.dart` was already there, added
-earlier for one event, and it is also a hook-payload parser — its own doc comment says so. The two
-independently declare **six of the same accessors over the same wire fields**: `session_id`,
-`prompt_id`, `cwd`, `permission_mode`, `transcript_path`, `prompt`.
+**Status: OPEN, and it is a deliberate v1 limit rather than a bug to fix in passing.** Found by
+P8-02, which is the leaf that created the second namespace.
 
-That is F-01's shape and F-11's exactly: two derivations of one fact, equal today, with nothing that
-fails when they stop being equal. Neither file imports the other, so a field that changes spelling
-gets fixed in whichever one the next reader happens to open.
+sprout now has two writers into one `node` table and they identify nodes differently:
 
-**The repair is small and obvious**, which is part of why it should be done deliberately rather than
-in passing: `UserPromptSubmitPayload` becomes a `HookPayload` — it already needs nothing the general
-class does not have — and keeps only what is genuinely its own, which is `origin`,
-`isMachineTraffic` and `taskNotification`, the `<task-notification>` classification that is the
-reason it exists at all. `stream.dart` keeps exporting the name, so no importer moves.
+- the **runner** path mints `[base36 stamp]-[hex salt]` for a root (`SessionRunner._defaultNodeId`)
+  and `[rootId]/[toolUseId]` for a subagent, from the stream of a process sprout launched;
+- the **hook** path mints `hook/[session_id]` and `hook/[session_id]/[agent_id]`
+  (`HookProjection`), from payloads a machine-wide hook config delivers.
 
-**Why it was not fixed by P8-01.** `lib/src/stream/prompt.dart` and `lib/stream.dart` are the stream
-leaf's files, not this one's, and siblings were working other leaves in the same tree. P8-01 also
-had no consumer to prove the merged shape against — it writes nothing. P8-02 will have one.
+The `hook/` prefix guarantees the two never collide, which is what makes them safe to run together.
+It also guarantees they never **recognise** each other. So a session sprout launched itself, on a
+machine where the hooks are also installed, appears on the board as two unrelated trees describing
+the same processes — with the same work counted twice by anything that sums over nodes.
 
-**What is NOT wrong here.** The two parsers do not disagree; every shared accessor reads the same
-key with the same null-on-wrong-type discipline, and the `agent_id`-based derivations that this
-leaf's tests actually pin are declared once. This is a hazard that has not fired, reported before it
-does.
+**Two facts would let a later leaf join them, and both are already recorded**, which is why this is
+a limit rather than a dead end:
+
+- `runner.session` carries `session_id` — `StoreProjection._recordSessionOnce` writes it from the
+  `system/init` frame;
+- every hook payload carries the same `session_id`, and `HookProjection` puts it in the `announce`
+  payload of the root's `runner.observed`.
+
+So the join is `runner.session.session_id` equal to the hook root's announced `session_id`. The
+second half — matching a *subagent* across the two — is the harder one and needs the `tool_use_id`
+bridge `17` §2 describes: the hook path announces the spawning `tool_use_id` on a claimed child, and
+the runner path uses that same id AS the child's node id.
+
+**Do not attempt the merge from a heuristic.** Matching on `cwd`, on timing or on prompt text would
+silently fuse two genuinely different sessions in the same project, which is worse than showing two
+trees — INV13 attributes from the control plane, never from a heuristic. Until a leaf does the
+explicit join above, both trees are honest and neither is guessed.
+
+---
+
+### F-15 — Hook input that carries no `session_id` has nowhere in the store to go
+
+**Status: OPEN.** Found by P8-02 while wiring the `hook.malformed` kind that P8-01 shipped.
+
+`HookProjection.observe` returns null and writes **nothing** for a record with no `session_id`.
+That is every `MalformedHookPayload` — input that was not JSON has no fields at all — and any
+payload that arrives without the field.
+
+It is not a drop that could have been avoided in this leaf. `event.node_id` is `NOT NULL` with a
+foreign key to `node`, so an event needs a node; the only ways to store such a record anyway are to
+attach it to an unrelated session, which is a lie, or to mint a sentinel node, which would then
+render on the board as an agent that does not exist and would need a `NodeStatus` value that does
+not exist either.
+
+**The asymmetry with the runner path is the finding.** There, a `MalformedFrame` *is* stored, as
+`frame.malformed` against the root of the run — because sprout launched that run and always knows
+its root. On the hook path the payload is the only thing that could say which session it belongs
+to, so when it is unreadable there is no root to fall back on.
+
+`hook.malformed` is therefore a kind this build can produce as a **value** but cannot currently
+**persist**. Two repairs are plausible and neither belongs to this leaf: a raw hook log beside the
+store, which is what `RawLog` already does for the stream path and would make the store a view of
+something durable; or making `event.node_id` nullable, which is a schema migration against
+databases already on disk. P8-03 owns the process that will actually receive these bytes and is the
+natural place to decide.
+
+---
+
+### F-17 — `NodeStatus` has no state for "the session's process is gone"
+
+**Status: OPEN, and deliberately not fixed by P8-02**, which is the leaf that met it.
+
+`SessionEnd` is the hook that fires when a `claude` process ends. `HookProjection` records it as
+`checkpointed`, which is the same mapping the runner already makes — `SessionRunner` marks a
+finished root `checkpointed` when the transcript carries a result — and it is the closest honest
+value in a vocabulary of `spawning | working | checkpointed | armed | cleared | parked`.
+
+It is nevertheless not the same fact. `checkpointed` means *handed back with progress and no
+question* (`01-plan.md` §5): a node that could be steered again. A node whose `SessionEnd` has
+fired cannot be steered at all, and nothing in the row says so. A watchdog reading the board to
+decide what is worth surfacing cannot tell a paused session from a dead one.
+
+**Why it was not repaired here.** Adding an enum value is a protocol change with an append-only
+feed behind it: the wire strings live in every `~/.sprout/*.db` ever written, `NodeStatus.fromWire`
+throws on a value it does not know rather than defaulting, and the browser branches on the same
+strings. That is a `sprout_protocol` change owing four commands and a decision about what old
+readers do with a status they have never seen — not a line in a projection.
+
+**What is NOT wrong here.** Nothing is lost: the `hook.SessionEnd` event is in the feed with its
+`reason`, so a consumer that needs the distinction today can read it. Only the *row* is lossy.
 
 ---
 

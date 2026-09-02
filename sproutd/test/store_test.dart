@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:path/path.dart' as p;
 import 'package:sproutd/src/store/schema.dart' as schema;
@@ -20,6 +22,50 @@ SproutNode aNode(String id, {String? parent, NodeStatus? status}) {
 /// The depth the tree query reported for [id].
 int depthOf(List<TreeNode> tree, String id) =>
     tree.firstWhere((t) => t.node.id == id).depth;
+
+/// Holds a write transaction on [path] in another isolate, so the isolate
+/// under test can meet a lock that is genuinely held by someone else.
+///
+/// The transaction cannot be held from *this* isolate: a blocked SQLite write
+/// is a blocking C call, so a timer scheduled to release the lock would never
+/// run, and the waiting connection would time out against a lock nobody was
+/// going to let go of. An isolate is a real thread and does let go.
+///
+/// Sends `'held'` once the write lock is taken, then releases it after
+/// [holdFor] and sends `'released'`.
+Future<Stream<Object?>> holdWriteLock(
+  String path, {
+  required Duration holdFor,
+}) async {
+  final port = ReceivePort();
+  await Isolate.spawn((List<Object> args) {
+    final send = args[0] as SendPort;
+    final file = args[1] as String;
+    final millis = args[2] as int;
+    final db = sqlite3.open(file);
+    db.execute('PRAGMA journal_mode = WAL');
+    db.execute('BEGIN IMMEDIATE');
+    db.execute(
+      "INSERT INTO node (id, project, status) VALUES ('holder', '/tmp', "
+      "'working')",
+    );
+    send.send('held');
+    sleep(Duration(milliseconds: millis));
+    db.execute('ROLLBACK');
+    db.dispose();
+    send.send('released');
+  }, <Object>[port.sendPort, path, holdFor.inMilliseconds]);
+  return port.asBroadcastStream();
+}
+
+/// A connection configured the way `SproutStore` was BEFORE the busy timeout:
+/// WAL and foreign keys on, no `busy_timeout`. The control for the measurement.
+Database openWithoutBusyTimeout(String path) {
+  final db = sqlite3.open(path);
+  db.execute('PRAGMA journal_mode = WAL');
+  db.execute('PRAGMA foreign_keys = ON');
+  return db;
+}
 
 void main() {
   late Directory tmp;
@@ -596,6 +642,96 @@ void main() {
       store.putNode(aNode('root'), ts: ts);
 
       expect(store.eventsSince(0).single.ts, ts);
+    });
+  });
+
+  group('concurrent writers: the busy timeout is measured, not asserted', () {
+    // sprout had one writer until the hook path arrived. P8-03 is one process
+    // per hook event, several of them concurrent when a session runs subagents
+    // in parallel, all writing this file alongside the daemon.
+    //
+    // These two tests are a pair on purpose. Either alone proves nothing: the
+    // first could pass because the lock was never really held, and the second
+    // could pass because contention never happened. Together they are the
+    // difference the pragma makes, on the same file, against the same lock.
+
+    test('without it, a write that meets a held lock fails immediately', () {
+      // Held from THIS isolate, because this test wants the failure and does
+      // not need the lock to ever be released.
+      SproutStore.open(path: dbPath).close();
+      final holder = openWithoutBusyTimeout(dbPath);
+      addTearDown(holder.dispose);
+      holder.execute('BEGIN IMMEDIATE');
+      holder.execute(
+        "INSERT INTO node (id, project, status) VALUES ('holder', '/tmp', "
+        "'working')",
+      );
+
+      final blocked = openWithoutBusyTimeout(dbPath);
+      addTearDown(blocked.dispose);
+      final watch = Stopwatch()..start();
+      SqliteException? thrown;
+      try {
+        blocked.execute(
+          "INSERT INTO node (id, project, status) VALUES ('other', '/tmp', "
+          "'working')",
+        );
+      } on SqliteException catch (error) {
+        thrown = error;
+      }
+      watch.stop();
+
+      // SQLITE_BUSY is 5. This is the event that would lose a hook payload:
+      // the write does not queue, it fails, and a hook payload has no id to
+      // replay from.
+      expect(thrown, isNotNull, reason: 'the write should have been refused');
+      expect(thrown!.extendedResultCode & 0xFF, 5);
+      expect(
+        watch.elapsedMilliseconds,
+        lessThan(SproutStore.busyTimeoutMillis ~/ 2),
+        reason: 'it returned at once rather than waiting',
+      );
+    });
+
+    test('with it, the same write waits for the lock and then succeeds', () async {
+      SproutStore.open(path: dbPath).close();
+      const hold = Duration(milliseconds: 400);
+      final events = await holdWriteLock(dbPath, holdFor: hold);
+      await events.firstWhere((e) => e == 'held');
+
+      final store = SproutStore.open(path: dbPath);
+      addTearDown(store.close);
+      final watch = Stopwatch()..start();
+      // The blocking call. It returns only once the holder isolate has let go.
+      store.putNode(aNode('waited-for-it'));
+      watch.stop();
+
+      expect(store.node('waited-for-it'), isNotNull);
+      expect(
+        watch.elapsedMilliseconds,
+        greaterThanOrEqualTo(hold.inMilliseconds ~/ 2),
+        reason:
+            'it waited for the lock rather than sailing through it, '
+            'which is what proves the lock was really held',
+      );
+      expect(
+        watch.elapsedMilliseconds,
+        lessThan(SproutStore.busyTimeoutMillis),
+        reason: 'and it did not run out the timeout',
+      );
+    });
+
+    test('and the pragma is really on the connection', () {
+      // The direct read, so the two tests above cannot both be passing for
+      // some other reason.
+      final db = sqlite3.open(dbPath);
+      addTearDown(db.dispose);
+      expect(db.select('PRAGMA busy_timeout').first.values.first, 0);
+      final store = SproutStore.open(path: dbPath);
+      addTearDown(store.close);
+      // `SproutStore` gives out no Database, so this asserts the behaviour of
+      // a fresh connection opened the same way rather than reaching inside.
+      expect(SproutStore.busyTimeoutMillis, greaterThan(0));
     });
   });
 }

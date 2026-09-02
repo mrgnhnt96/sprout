@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../hooks/payload.dart';
 import 'json.dart';
 
 /// Who actually wrote a `UserPromptSubmit` prompt.
@@ -29,15 +30,27 @@ enum PromptOrigin {
 /// the payload marks it.
 ///
 /// The field is `prompt`, not `prompt_text`; `06` had that wrong too.
-class UserPromptSubmitPayload {
+///
+/// **It is a [HookPayload], and adds only the classification.** `session_id`,
+/// `prompt_id`, `cwd`, `permission_mode`, `transcript_path` and `prompt` are
+/// inherited: this class used to declare all six a second time, over the same
+/// wire keys with the same null-on-wrong-type discipline, which is finding
+/// F-14 — two derivations of one fact with nothing that fails when they stop
+/// being equal. Everything below this line is what is genuinely its own.
+final class UserPromptSubmitPayload extends HookPayload {
   /// Wraps a decoded payload.
-  UserPromptSubmitPayload(this.raw);
+  const UserPromptSubmitPayload(super.raw);
 
   /// Decodes a payload from the JSON a hook received on stdin.
   ///
   /// Returns null rather than throwing when the input is not a JSON object, for
   /// the same reason the stream parser never throws: a gate that dies on a
   /// surprising payload fails open.
+  ///
+  /// Narrower than [HookRecord.parse], on purpose: that one is total and hands
+  /// back a [MalformedHookPayload] for input this returns null for. A caller
+  /// here already knows which event it is holding and wants the classification
+  /// or nothing.
   static UserPromptSubmitPayload? tryParse(String json) {
     final Object? decoded;
     try {
@@ -48,28 +61,6 @@ class UserPromptSubmitPayload {
     final map = asMap(decoded);
     return map == null ? null : UserPromptSubmitPayload(map);
   }
-
-  /// The payload as it arrived.
-  final Map<String, Object?> raw;
-
-  /// The session the prompt was submitted to.
-  String? get sessionId => asString(raw['session_id']);
-
-  /// The prompt's own id.
-  String? get promptId => asString(raw['prompt_id']);
-
-  /// The session's working directory.
-  String? get cwd => asString(raw['cwd']);
-
-  /// e.g. `bypassPermissions`.
-  String? get permissionMode => asString(raw['permission_mode']);
-
-  /// Always the **root** session's transcript, even inside a subagent.
-  String? get transcriptPath => asString(raw['transcript_path']);
-
-  /// The prompt text. The field is `prompt`; `06`'s `prompt_text` does not
-  /// exist.
-  String? get prompt => asString(raw['prompt']);
 
   /// Who wrote [prompt].
   PromptOrigin get origin => taskNotification == null

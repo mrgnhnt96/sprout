@@ -106,6 +106,23 @@ class SproutStore {
   /// by the integrity check in [tree] and reported as [TreeIntegrityError].
   static const int maxTreeDepth = 64;
 
+  /// How long a write waits for another connection's lock before giving up.
+  ///
+  /// **A knob, not a finding.** No measurement says five seconds is the right
+  /// number; what is measured, in `store_test.dart`, is the difference between
+  /// having the pragma and not having it — without it a write that meets a
+  /// held lock fails at once with `SQLITE_BUSY`, and with it the same write
+  /// waits and then succeeds.
+  ///
+  /// It exists because sprout stopped having one writer. The daemon was the
+  /// only one until the hook path arrived: P8-03 is **one process per hook
+  /// event**, several of them concurrent whenever a session runs subagents in
+  /// parallel, all writing this file alongside the daemon. SQLite's default
+  /// busy handler returns `SQLITE_BUSY` immediately, so with no timeout a hook
+  /// that happens to collide loses its event outright — and a hook payload has
+  /// no unique id to replay from, so the loss is permanent and silent.
+  static const int busyTimeoutMillis = 5000;
+
   static void _configure(Database db) {
     // WAL is what lets `sprout status` read while the daemon writes. It is
     // persistent in the file, so it survives reopening, and it is a no-op that
@@ -114,6 +131,8 @@ class SproutStore {
     // Off by default in SQLite, per connection, and never inherited from the
     // file — so it has to be set on every connection, including a reader's.
     db.execute('PRAGMA foreign_keys = ON');
+    // Per connection too, and zero by default. See [busyTimeoutMillis].
+    db.execute('PRAGMA busy_timeout = $busyTimeoutMillis');
   }
 
   /// The default location: `~/.sprout/sprout.db`.

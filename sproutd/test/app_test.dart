@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:sproutd/protocol.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
 
@@ -117,7 +118,7 @@ void main() {
 
     test('streams over @WebSocket and never @SSE', () {
       expect(
-        RegExp(r'^\s*@WebSocket\(', multiLine: true).hasMatch(sources),
+        RegExp(r'^\s*@WebSocket[.(]', multiLine: true).hasMatch(sources),
         isTrue,
       );
       expect(
@@ -147,9 +148,16 @@ void main() {
     setUp(() => store = SproutStore.memory());
     tearDown(() => store.close());
 
-    test('snapshots an empty store as no nodes at cursor 0', () {
+    test('snapshots an empty store as no nodes, at a real cursor', () {
+      // Phase 2's snapshot, not Phase 1's: `GET /api/tree` and the socket's
+      // opening frame are the same `takeSnapshot`, so the two cannot drift
+      // into two different pictures of one tree.
       final snapshot = TreeController(store).snapshot();
-      expect(snapshot, {'cursor': 0, 'nodes': isEmpty});
+      expect(snapshot['nodes'], isEmpty);
+      expect(Cursor.parse(snapshot['cursor']! as String).position, 0);
+      // The fields that must survive any compression are present even here.
+      expect(snapshot['journal_unreadable'], isNull);
+      expect(snapshot['resources'], isEmpty);
     });
 
     test(
@@ -187,37 +195,36 @@ void main() {
         store.append(nodeId: 'a', kind: 'runner.spawned');
 
         final snapshot = TreeController(store).snapshot();
-        expect(snapshot['cursor'], 1);
+        expect(Cursor.parse(snapshot['cursor']! as String).position, 1);
         final nodes = (snapshot['nodes'] as List).cast<Map<String, Object?>>();
-        expect(nodes.map((n) => n['id']), ['a', 'z', 'a/child']);
-        expect(nodes.map((n) => n['depth']), [0, 0, 1]);
-        expect(nodes[0], {
-          'id': 'a',
-          'parent_id': null,
-          'depth': 0,
-          'project': '/p',
-          'role': null,
-          'status': 'working',
-          'current_task': 'root task',
-          'since': '2026-09-01T12:00:00.000Z',
-          'next_checkin': null,
-        });
-        expect(nodes[1]['parent_id'], 'ghost');
-        expect(nodes[2]['status'], 'checkpointed');
+        // Depth first, each parent immediately before its own children —
+        // `takeSnapshot`'s order, not the store's breadth-first tree().
+        expect(nodes.map((n) => n['id']), ['a', 'a/child', 'z']);
+        expect(nodes.map((n) => n['depth']), [0, 1, 0]);
+        expect(nodes[0], containsPair('parent_id', null));
+        expect(nodes[0], containsPair('status', 'working'));
+        expect(nodes[0], containsPair('current_task', 'root task'));
+        expect(nodes[0], containsPair('since', '2026-09-01T12:00:00.000Z'));
+        // Absence is transmitted, never estimated: no check-in is null here
+        // and NONE SCHEDULED where a human reads it.
+        expect(nodes[0], containsPair('next_checkin', null));
+        expect(nodes[2]['parent_id'], 'ghost');
+        expect(nodes[1]['status'], 'checkpointed');
         // Revali encodes the return value; a map it cannot encode is a 500.
         expect(() => jsonEncode(snapshot), returnsNormally);
       },
     );
 
-    test('greets a socket with the cursor, which moves as events land', () {
-      final controller = TreeController(store);
-      expect(controller.events(), {'type': 'hello', 'cursor': 0});
-      store
-        ..putNode(
-          const SproutNode(id: 'a', project: '/p', status: NodeStatus.working),
-        )
-        ..append(nodeId: 'a', kind: 'runner.spawned');
-      expect(controller.events(), {'type': 'hello', 'cursor': 1});
+    test('opens a socket with a snapshot frame rather than a hello', () async {
+      // P1-06's `hello` stub is gone: the socket opens with the whole world,
+      // because "an event saying leaf.closed is not a picture, it is a delta
+      // against one". What the socket does *after* that frame — and that it
+      // stays open at all, which the stub did not — is `test/ws_test.dart`,
+      // over a real server and a real client.
+      final first = await TreeController(store).events(null).first;
+      final frame = jsonDecode(first.value) as Map<String, Object?>;
+      expect(frame['type'], snapshotFrameType);
+      expect(frame['nodes'], isEmpty);
     });
   });
 

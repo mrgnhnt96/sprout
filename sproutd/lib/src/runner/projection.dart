@@ -8,13 +8,37 @@ import '../../stream.dart';
 /// to something the runner itself recorded (`runner.*`).
 const String frameKindPrefix = 'frame.';
 
+/// The event appended when a subagent node is recorded for the first time.
+///
+/// The runner does not launch a subagent — Claude Code does — so there is no
+/// `runner.spawned` for one. This is its counterpart: it is attributed to the
+/// subagent's own id, exactly as `runner.spawned` is attributed to the root's,
+/// and it is what lets a consumer holding a snapshot plus every delta since
+/// learn that the node exists without taking a fresh snapshot.
+const String subagentObservedKind = 'runner.observed';
+
+/// The event appended when a subagent node already in the feed changes.
+///
+/// A subagent's `status` and `current_task` both move while it runs, and a
+/// feed that announced the node once and then went quiet would leave a live
+/// tree showing a node frozen on its first label. Separate from
+/// [subagentObservedKind] so that a change is never mistaken for a second
+/// creation of the same node.
+const String subagentUpdatedKind = 'runner.updated';
+
 /// Projects one session's stream into the store as it arrives.
 ///
 /// Every frame becomes one event, attributed to the node that emitted it — the
 /// root, or the subagent named by `parent_tool_use_id` — and every subagent the
-/// tree observes becomes a node row under the root. The store is a *view* of
-/// the run; the raw log is the run. The two are written in that order, so an
-/// exception here can never cost the frame that caused it.
+/// tree observes becomes a node row under the root, together with an event
+/// announcing it. The store is a *view* of the run; the raw log is the run.
+/// The two are written in that order, so an exception here can never cost the
+/// frame that caused it.
+///
+/// A node's event is appended *before* the first frame attributed to that
+/// node: `observe` syncs the subagents and only then appends the frame. That
+/// order is what keeps a consumer from ever reading an event against a node it
+/// has not been told about.
 ///
 /// What the events carry is the frame verbatim, in a `payload` column. The
 /// kinds are open strings (`frame.assistant`, `frame.system.init`,
@@ -141,9 +165,53 @@ final class StoreProjection {
       );
       if (previous != null && _same(previous, next)) continue;
       store.putNode(next);
+      // The event is appended here, beside the row it describes, so that a
+      // row can never be written without the feed learning of it. `_same`
+      // above is what keeps this from firing once per frame: an update event
+      // is appended only when a field a consumer renders actually moved.
+      store.append(
+        nodeId: id,
+        kind: previous == null ? subagentObservedKind : subagentUpdatedKind,
+        payload: previous == null
+            ? _observedPayload(toolUseId, next)
+            : _updatedPayload(toolUseId, previous, next),
+        ts: _clock(),
+      );
       _subagents[id] = next;
     }
   }
+
+  /// The whole node, so a consumer can build the row from this event alone
+  /// rather than having to re-`snapshot` to learn the fields.
+  static Map<String, Object?> _observedPayload(
+    String toolUseId,
+    SproutNode node,
+  ) => {
+    'tool_use_id': toolUseId,
+    'parent_id': node.parentId,
+    'project': node.project,
+    'status': node.status.wire,
+    'current_task': node.currentTask,
+  };
+
+  /// Only what moved, each as `{from, to}`.
+  ///
+  /// A consumer that has applied the [subagentObservedKind] event already
+  /// holds the rest, and spelling out the unchanged fields would make a
+  /// status flip indistinguishable from a re-creation in the feed.
+  static Map<String, Object?> _updatedPayload(
+    String toolUseId,
+    SproutNode previous,
+    SproutNode next,
+  ) => {
+    'tool_use_id': toolUseId,
+    if (previous.parentId != next.parentId)
+      'parent_id': {'from': previous.parentId, 'to': next.parentId},
+    if (previous.status != next.status)
+      'status': {'from': previous.status.wire, 'to': next.status.wire},
+    if (previous.currentTask != next.currentTask)
+      'current_task': {'from': previous.currentTask, 'to': next.currentTask},
+  };
 
   NodeStatus _statusOf(String toolUseId) {
     for (final task in transcript.tasks.tasks.values) {

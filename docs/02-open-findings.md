@@ -15,30 +15,6 @@ are quoted in the entry.
 
 ---
 
-## F-02 — Creating a subagent node appends no event
-
-**Status:** BLOCKING Phase 3 · **Found by:** P2-04's end-to-end test · **Fix lives in:**
-`sproutd/lib/src/runner/projection.dart:143`
-
-`StoreProjection._syncSubagents` writes a subagent's node row with `putNode` and appends **no
-event**, while every frame it goes on to emit is attributed to the emitting node. The consequence
-is precise: a consumer holding a snapshot **plus every delta after it** still does not know that
-subagent node exists. Only a fresh `snapshot` reveals it.
-
-A new *root* does announce itself, via `runner.spawned` — so this is a gap in one path, not a
-missing mechanism.
-
-This blocks Phase 3 directly. A live UI is built on the promise that `snapshot` once + `watch`
-forever keeps you current; here it silently does not, and the failure looks like a subagent that
-never appeared rather than like an error. P2-05 was explicitly told **not** to paper over it by
-re-snapshotting on the socket, and did not.
-
-**The fix** is appending a node-created event in the same write that creates the row, so the two
-cannot diverge. P2-04 asserted the gap rather than repairing it or relaxing its test around it;
-that assertion will fail when the event is added, which is the point.
-
----
-
 ## F-03 — `@WebSocket.ping(...)` is silently dropped, and that leaks a session per disconnect
 
 **Status:** BLOCKING Phase 3 · **Found by:** P2-05 · **Fix lives in:** upstream

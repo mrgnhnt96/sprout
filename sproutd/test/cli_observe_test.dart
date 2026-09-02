@@ -19,6 +19,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:sproutd/protocol.dart';
+import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
@@ -454,39 +455,49 @@ void main() {
         // its own id, so the consumer learns of it from the feed alone.
         expect(namedByDeltas.difference(knownBefore), isNotEmpty);
 
-        // **But a subagent node is invisible to the feed.**
-        // `StoreProjection._syncSubagents` writes the subagent's row with
-        // `putNode` and appends no event for it
-        // (`lib/src/runner/projection.dart:143`), while every frame it emits
-        // is attributed to the node that emitted it. So a consumer holding
-        // this snapshot plus every delta after it still does not know the
-        // subagent exists, and only a fresh `snapshot` will tell it.
-        //
-        // Asserted rather than skipped, and asserted as a *fact about the
-        // feed* rather than relaxed away: a test that simply stopped looking
-        // here would report the same green as one that checked (INV8). The
-        // feed is written in `lib/src/runner/`, which this leaf does not own,
-        // so this is reported rather than repaired. When node creation gains
-        // an event, this expectation fails and says exactly what changed.
+        // **And a subagent node announces itself too** (F-02, repaired).
+        // `StoreProjection._syncSubagents` appends `runner.observed` against
+        // the subagent's own id in the same pass that writes its row, so a
+        // consumer holding this snapshot plus every delta after it learns of
+        // every new node from `watch` alone. Nothing here needs a second
+        // `snapshot`.
         final invisible = knownAfter.difference(
           knownBefore.union(namedByDeltas),
         );
         expect(
           invisible,
-          isNotEmpty,
+          isEmpty,
           reason:
-              'if this is now empty, node creation reached the feed and the '
-              'comment above is stale',
+              'every node the second snapshot knows about was either already '
+              'in the first one or named by a delta; a node here would be one '
+              'only a fresh snapshot can reveal',
         );
-        for (final id in invisible) {
-          expect(
-            id,
-            contains('/'),
-            reason:
-                'only subagent nodes should be missing from the feed; a '
-                'missing root would mean runner.spawned stopped being appended',
-          );
-        }
+
+        // The paired positives, so the assertion above cannot pass by the
+        // feed having gone quiet. Both halves of the announcement are
+        // present: a new ROOT via `runner.spawned`, and every new SUBAGENT
+        // via `runner.observed`. A missing root would mean `runner.spawned`
+        // stopped being appended.
+        final announced = {
+          for (final delta in frames.whereType<DeltaFrame>())
+            for (final event in delta.events)
+              if (event.kind == 'runner.spawned' ||
+                  event.kind == subagentObservedKind)
+                event.nodeId,
+        };
+        final arrived = knownAfter.difference(knownBefore);
+        expect(arrived, isNotEmpty, reason: 'the second capture added nodes');
+        expect(arrived.where((id) => !id.contains('/')), isNotEmpty);
+        expect(arrived.where((id) => id.contains('/')), isNotEmpty);
+        expect(
+          announced,
+          containsAll(arrived),
+          reason: 'every node that arrived announced itself in the feed',
+        );
+
+        // The snapshot and the replay agree: the picture a consumer builds
+        // from deltas names no node the store does not have.
+        expect(knownAfter.containsAll(announced), isTrue);
       },
       timeout: const Timeout(Duration(minutes: 3)),
     );

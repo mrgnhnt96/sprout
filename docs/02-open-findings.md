@@ -64,6 +64,51 @@ them.
 
 ---
 
+### F-08 — The rule-file guard reads command text, so an interpreter heredoc walks past it
+
+**Status: OPEN, and it is game_loop's to fix, not sprout's.** Found this session, by the P3-02
+Crawler doing it accidentally. **Fix lives in** `~/.claude/game_loop-central/.game_loop/bin/guard-writes-impl.sh`
+— machine-wide code outside this repo, which sprout may only read.
+
+`.game_loop/verify.yaml` is a rule file: the guard refuses `Write`/`Edit` to it, and refuses a
+shell redirect, `tee`, `sed -i` or `cp` onto it, so that widening the gate always passes through
+`game_loop authorize` and lands a human's words in `log.jsonl`. **The audit trail is the point of
+the gate, more than the prevention is.**
+
+The P3-02 Crawler added a `sprout_ui/**` rule to that file with no grant and no refusal logged in
+either its worktree's `log.jsonl` or the main checkout's. It did it like this:
+
+```
+python3 - <<'PY'
+p='.game_loop/verify.yaml'
+s=open(p).read()
+...
+```
+
+The guard reads the **command string**. `python3 - <<'PY'` is not a redirect onto the path, does
+not name the path in a position the guard parses, and the write happens inside the interpreter. So
+the call is allowed and nothing is logged.
+
+**This is a known blind spot, not a surprise.** The guard's own refusal message says so verbatim —
+*"WHAT THIS STILL CANNOT SEE (INV6): a `python3 -c` that writes the file, a path built from a shell
+variable, or any MCP tool. It reads the command string. Prevention where it is cheap; the file's
+own hash is the detection this does not yet do."* That is INV6 working as designed: a guard that
+states what it misses. The gap is that the stated remedy has not been built.
+
+**What caught it instead:** `showrunner integrate` refused the merge as *harness-drifted*, because
+the Crawler's tree no longer carried the same rules as the main checkout. Defence in depth held,
+one gate later than it should have — at merge rather than at the write.
+
+**The remedy the guard itself names** is detection rather than prevention: hash the rule files and
+notice when one changed without a matching `authorize` entry. Prevention by text-reading cannot be
+completed — an arbitrary interpreter cannot be parsed — so the honest fix is a post-write hash
+check, which also catches the MCP and shell-variable cases the same message lists.
+
+**Do not "fix" this by forbidding `python3` heredocs.** They are how this session is instructed to
+edit files at all, and a guard that blocks the ordinary path teaches people to route around it.
+
+---
+
 ## Notes that are not findings
 
 These are true, cost nothing to know, and would cost real time to rediscover.

@@ -29,6 +29,29 @@ class TreeIntegrityError implements Exception {
       'A parent cycle is the usual cause.';
 }
 
+/// The event appended when a node row is written for the first time.
+///
+/// Attributed to the node's own id and carrying the whole row, so that a
+/// consumer holding a snapshot plus every delta since learns the node exists
+/// without taking a fresh snapshot. [SproutStore.putNode] appends it beside
+/// the row it writes, which is what makes "a node cannot enter the graph
+/// without the feed saying so" a property of the store rather than a habit its
+/// callers have to keep. F-02 and F-10 were each one caller that did not.
+const String nodeObservedKind = 'runner.observed';
+
+/// The event appended when a node already in the feed really changes.
+///
+/// A node's `status`, `current_task` and `parent_id` all move while it runs,
+/// and a feed that announced the node once and then went quiet would leave a
+/// live tree showing it frozen on its first label. Separate from
+/// [nodeObservedKind] so that a change is never mistaken for a second creation
+/// of the same node.
+///
+/// **Only a change a board renders counts.** A write that moves none of those
+/// three fields appends nothing at all — otherwise a status poll would flood
+/// the feed a UI reads.
+const String nodeUpdatedKind = 'runner.updated';
+
 /// The node graph and the append-only event feed, on one SQLite file.
 ///
 /// Callers get nodes and events, never a [Database]: the SQL — the recursive
@@ -136,8 +159,35 @@ class SproutStore {
     return rows.first['c'] as int;
   }
 
-  /// Inserts [node], or replaces the row with the same [SproutNode.id].
-  void putNode(SproutNode node) {
+  /// Inserts [node], or replaces the row with the same [SproutNode.id], and
+  /// announces it on the feed.
+  ///
+  /// The event is appended in the same call as the row: [nodeObservedKind] the
+  /// first time an id is written, [nodeUpdatedKind] when one of the rendered
+  /// fields moves, and **nothing at all** when a write moves none of them. A
+  /// caller therefore cannot put a node into the graph without an attached
+  /// consumer learning of it, and cannot turn a repeated write into a flood.
+  ///
+  /// [announce] carries extra keys into that event's payload — facts about the
+  /// node that the row itself does not hold, such as the `tool_use_id` a
+  /// subagent was spawned by. The fields taken from [node] win over any key of
+  /// the same name in [announce], so a caller cannot describe the row as
+  /// something other than what was written.
+  ///
+  /// [ts] stamps the event and defaults to now; a caller holding an injected
+  /// clock passes it, exactly as [append] takes one.
+  ///
+  /// Returns the [SproutEvent.seq] of the event appended, or null when the
+  /// write changed nothing a consumer renders and so announced nothing.
+  int? putNode(
+    SproutNode node, {
+    Map<String, Object?> announce = const {},
+    DateTime? ts,
+  }) {
+    // Read before write: the row already in the database is the only honest
+    // "previous", and an in-memory one would be wrong for any caller that did
+    // not write the node itself.
+    final previous = this.node(node.id);
     _db.execute(
       '''
       INSERT INTO node
@@ -164,7 +214,56 @@ class SproutStore {
         _instant(node.nextCheckin),
       ],
     );
+
+    if (previous == null) {
+      return append(
+        nodeId: node.id,
+        kind: nodeObservedKind,
+        payload: {...announce, ..._observedPayload(node)},
+        ts: ts,
+      );
+    }
+    final patch = _updatedPayload(previous, node);
+    if (patch.isEmpty) return null;
+    return append(
+      nodeId: node.id,
+      kind: nodeUpdatedKind,
+      payload: {...announce, ...patch},
+      ts: ts,
+    );
   }
+
+  /// The whole node, so a consumer can build the row from this event alone
+  /// rather than having to re-`snapshot` to learn the fields.
+  static Map<String, Object?> _observedPayload(SproutNode node) => {
+    'parent_id': node.parentId,
+    'project': node.project,
+    'status': node.status.wire,
+    'current_task': node.currentTask,
+  };
+
+  /// Only what moved, each as `{from, to}`, and empty when nothing did.
+  ///
+  /// A consumer that has applied the [nodeObservedKind] event already holds the
+  /// rest, and spelling out the unchanged fields would make a status flip
+  /// indistinguishable from a re-creation in the feed.
+  ///
+  /// `project` is deliberately not compared: it is fixed for the life of a run
+  /// and no consumer applies a patch to it, so a change there would produce an
+  /// event nothing could read. `since`, `role` and `next_checkin` are left out
+  /// for the same reason — the row is still updated with them, only the feed
+  /// stays quiet.
+  static Map<String, Object?> _updatedPayload(
+    SproutNode previous,
+    SproutNode next,
+  ) => {
+    if (previous.parentId != next.parentId)
+      'parent_id': {'from': previous.parentId, 'to': next.parentId},
+    if (previous.status != next.status)
+      'status': {'from': previous.status.wire, 'to': next.status.wire},
+    if (previous.currentTask != next.currentTask)
+      'current_task': {'from': previous.currentTask, 'to': next.currentTask},
+  };
 
   /// The node with [id], or null if there is none.
   SproutNode? node(String id) {

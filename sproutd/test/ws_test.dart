@@ -118,7 +118,13 @@ void main() {
 
         final delta = ProtocolFrame.decodeLine(await wire.next());
         expect(delta, isA<DeltaFrame>());
-        expect((delta as DeltaFrame).events.single.kind, 'runner.spawned');
+        // Two events, because writing the row announced it: `putNode` puts
+        // the node on the feed in the same call, which is what lets this
+        // client learn about `a` without re-snapshotting.
+        expect((delta as DeltaFrame).events.map((e) => e.kind), [
+          nodeObservedKind,
+          'runner.spawned',
+        ]);
       });
     });
 
@@ -155,17 +161,18 @@ void main() {
         },
         since: (SproutInstance instance) => instance.cursorAt(1).encode(),
       );
-      // snapshot, then the replay of seq 2 and 3, then ready. Strictly after
-      // the cursor: the consumer already holds seq 1.
+      // Seq 1 is the row's own announcement, which this consumer holds.
+      // Snapshot, then the replay of seq 2, 3 and 4, then ready. Strictly
+      // after the cursor: seq 1 is not resent.
       expect(
         (jsonDecode(await wire.next()) as Map<String, Object?>)['type'],
         snapshotFrameType,
       );
       final delta = ProtocolFrame.decodeLine(await wire.next()) as DeltaFrame;
-      expect(delta.events.map((e) => e.seq), [2, 3]);
+      expect(delta.events.map((e) => e.seq), [2, 3, 4]);
       final ready = ProtocolFrame.decodeLine(await wire.next());
       expect(ready, isA<ReadyFrame>());
-      expect(ready.cursor.position, 3);
+      expect(ready.cursor.position, 4);
     });
   });
 
@@ -202,7 +209,7 @@ void main() {
       );
       final bye = ProtocolFrame.decodeLine(await wire.next()) as ByeFrame;
       expect(bye.cursor.instanceId, wire.instance.id);
-      expect(bye.cursor.position, 1, reason: 'where THIS daemon stands');
+      expect(bye.cursor.position, 2, reason: 'where THIS daemon stands');
       expect(bye.cursor.instanceId, isNot('deadbeefdeadbeef'));
     });
 
@@ -258,7 +265,8 @@ void main() {
             )
             ..append(nodeId: 'a', kind: 'runner.spawned');
         },
-        since: (SproutInstance instance) => instance.cursorAt(1).encode(),
+        // The head of a feed holding the row's announcement and the spawn.
+        since: (SproutInstance instance) => instance.cursorAt(2).encode(),
       );
       expect(
         (jsonDecode(await wire.next()) as Map<String, Object?>)['type'],
@@ -297,7 +305,7 @@ void main() {
             ),
           )
           ..append(nodeId: 'a', kind: 'runner.spawned');
-        final fromCli = cli.instanceForStore(store).cursorAt(1).encode();
+        final fromCli = cli.instanceForStore(store).cursorAt(2).encode();
 
         wire = await _serve(store: store, since: fromCli);
         // Accepted means a picture and a `ready`, not a `bye`. Asserting the

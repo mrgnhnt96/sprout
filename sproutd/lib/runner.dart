@@ -27,12 +27,7 @@ export 'src/runner/launcher.dart'
         SessionLaunch,
         SessionProcess,
         claudeArguments;
-export 'src/runner/projection.dart'
-    show
-        StoreProjection,
-        frameKindPrefix,
-        subagentObservedKind,
-        subagentUpdatedKind;
+export 'src/runner/projection.dart' show StoreProjection, frameKindPrefix;
 export 'src/runner/raw_log.dart' show RawLog;
 export 'src/runner/session_runner.dart'
     show

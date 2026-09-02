@@ -22,4 +22,5 @@ export 'package:sprout_protocol/values.dart'
     show NodeStatus, SproutEvent, SproutNode, TreeNode;
 
 export 'src/store/schema.dart' show SchemaVersionError, currentSchemaVersion;
-export 'src/store/sprout_store.dart' show SproutStore, TreeIntegrityError;
+export 'src/store/sprout_store.dart'
+    show SproutStore, TreeIntegrityError, nodeObservedKind, nodeUpdatedKind;

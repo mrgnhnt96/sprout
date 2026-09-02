@@ -195,10 +195,17 @@ void main() {
 
   group('what the feed does not describe is shown, never dropped', () {
     test('the root is a stranger, because nothing announced it', () {
-      // Not a defensive flourish: measured. `SproutStore.putNode` writes no
-      // event, so a root created after this client attached reaches the feed
+      // Not a defensive flourish: measured. `live_wire.bin` was captured from
+      // a daemon predating F-10, when `SproutStore.putNode` wrote a row and no
+      // event, so a root created after this client attached reached the feed
       // only as `runner.spawned` — a pid and a command line, not a node row.
-      // Recorded in `docs/02-open-findings.md`.
+      //
+      // **The capture is kept exactly as it was, and so is this test.** F-10
+      // made the root announce itself (see the group below, which builds one
+      // the way a daemon does today), but an id sprout emits events about with
+      // no node row behind it is still real, and a client that hid it would
+      // report a smaller tree than exists. This is the proof that path still
+      // works, paired with the positive rather than replaced by it.
       expect(settled.strangers, hasLength(1));
       final root = settled.strangers.entries.single;
       expect(root.key, isNot(contains('/')), reason: 'a root has no parent');
@@ -299,6 +306,105 @@ void main() {
         expect(App.describe(frame), isNotEmpty);
       }
       expect(App.describe(null), 'not attached');
+    });
+  });
+
+  group('a root announced by the feed is a node, not a stranger', () {
+    // F-10, from the consumer's side. `live_wire.bin` cannot show this — it
+    // was recorded before the fix — so the frames here are built the way the
+    // daemon builds them now: `runner.observed` carrying the whole row when
+    // the root is created, then `runner.updated` when `_markRoot` moves it.
+    // The payload shapes are the ones `kinds_test.dart` pins against the
+    // producer's own source.
+    const instanceId = '0123456789abcdef';
+    final at = DateTime.utc(2026, 9, 1, 14, 15);
+
+    SproutEvent event(
+      int seq,
+      String nodeId,
+      String kind,
+      Map<String, Object?> payload,
+    ) => SproutEvent(
+      seq: seq,
+      nodeId: nodeId,
+      ts: at,
+      kind: kind,
+      payload: payload,
+    );
+
+    DeltaFrame delta(List<SproutEvent> events) => DeltaFrame(
+      cursor: Cursor(instanceId: instanceId, position: events.last.seq),
+      events: events,
+    );
+
+    final announced = LiveTree.attaching.apply(
+      delta([
+        event(1, 'root-1', nodeObservedKind, {
+          'parent_id': null,
+          'project': '/w/sprout',
+          'status': 'spawning',
+          'current_task': 'map the repo and delegate two probes',
+        }),
+        event(2, 'root-1', 'runner.spawned', {'pid': 4242}),
+        event(3, 'root-1', nodeUpdatedKind, {
+          'status': {'from': 'spawning', 'to': 'working'},
+        }),
+      ]),
+    );
+
+    test('it arrives with its project, task and status, from deltas alone', () {
+      // No snapshot went in: `LiveTree.attaching` holds nothing, and every
+      // field below came off the feed. That is the whole claim of F-10 — the
+      // bug was invisible to anything that re-snapshotted.
+      expect(announced.strangers, isEmpty);
+      final root = announced.nodes.single;
+      expect(root.node.id, 'root-1');
+      expect(root.depth, 0);
+      expect(root.node.project, '/w/sprout');
+      expect(root.node.currentTask, 'map the repo and delegate two probes');
+      // The update was applied, not just the creation: a board that handled
+      // creation alone would show `spawning` here for the whole run.
+      expect(root.node.status, NodeStatus.working);
+    });
+
+    test('and its line is a real one, not the `?` a stranger gets', () {
+      final lines = App.lines(announced);
+      expect(lines.where((l) => l.contains(strangerText)), isEmpty);
+      expect(lines, contains(announced.nodes.single.render(at)));
+    });
+
+    test('a subagent announced after it nests under the root', () {
+      // The order the daemon really emits: the root first, then children whose
+      // `parent_id` names it. Before F-10 the root was absent, so a subagent's
+      // parent was unknown and it rendered at depth 0.
+      final withChild = announced.apply(
+        delta([
+          event(4, 'root-1/$child', nodeObservedKind, {
+            'tool_use_id': child,
+            'parent_id': 'root-1',
+            'project': '/w/sprout',
+            'status': 'working',
+            'current_task': 'Nested subagent chain test',
+          }),
+        ]),
+      );
+      expect(withChild.nodes.map((n) => n.depth), [0, 1]);
+      expect(withChild.strangers, isEmpty);
+    });
+
+    test('an id nothing described is still a stranger', () {
+      // The paired negative (INV8). The fix must not make the stranger path
+      // unreachable: a `frame.*` event about an id with no row behind it is
+      // exactly the runaway sprout exists to surface.
+      final withGhost = announced.apply(
+        delta([event(4, 'ghost', 'frame.assistant', const {})]),
+      );
+      expect(withGhost.strangers, {'ghost': 1});
+      expect(withGhost.nodes.map((n) => n.node.id), ['root-1']);
+      expect(
+        App.lines(withGhost).where((l) => l.contains(strangerText)),
+        hasLength(1),
+      );
     });
   });
 

@@ -90,11 +90,34 @@ final class Driver {
   }
 }
 
-/// Appends [count] events and returns their seqs.
+/// How many `node-<i>` rows every test starts with, plus the spare `n`.
+///
+/// The rows exist **before** a test appends anything, because `putNode`
+/// announces a node on the feed in the same call it writes the row: a node
+/// created part-way through a test would land a `runner.observed` in the
+/// middle of the events the test is counting. Seeding them up front and
+/// measuring from `feedBase` keeps every assertion below about the events the
+/// test itself put there.
+const int nodePoolSize = 400;
+
+/// Creates the node pool and returns the position the feed stands at after it.
 ///
 /// The node rows come first because `event.node_id` carries a real foreign
 /// key: an event names a node sprout created a moment earlier, so a feed of
 /// events about nothing is refused by the schema itself.
+int seedNodes(SproutStore store) {
+  for (var i = 0; i < nodePoolSize; i++) {
+    store.putNode(
+      SproutNode(id: 'node-$i', project: '/w/root', status: NodeStatus.working),
+    );
+  }
+  store.putNode(
+    SproutNode(id: 'n', project: '/w/root', status: NodeStatus.working),
+  );
+  return store.cursor;
+}
+
+/// Appends [count] events and returns their seqs.
 List<int> appendEvents(
   SproutStore store,
   int count, {
@@ -105,13 +128,8 @@ List<int> appendEvents(
   ];
 }
 
-/// Appends one event about [nodeId], creating the node row if it is new.
+/// Appends one event about [nodeId], which [seedNodes] has already created.
 int appendEvent(SproutStore store, String nodeId, {String kind = 'spawned'}) {
-  if (store.node(nodeId) == null) {
-    store.putNode(
-      SproutNode(id: nodeId, project: '/w/root', status: NodeStatus.working),
-    );
-  }
   return store.append(nodeId: nodeId, kind: kind, payload: {'node': nodeId});
 }
 
@@ -131,6 +149,7 @@ void main() {
   late SproutInstance instance;
   late Driver driver;
   late DateTime clock;
+  late int feedBase;
   final drivers = <Driver>[];
 
   /// A fresh set of signals, disposed with the test. Each session needs its
@@ -144,6 +163,7 @@ void main() {
 
   setUp(() {
     store = SproutStore.memory();
+    feedBase = seedNodes(store);
     instance = SproutInstance(testInstanceId);
     drivers.clear();
     driver = newDriver();
@@ -204,7 +224,7 @@ void main() {
     test('every delta ends at its own last event seq', () async {
       final seqs = appendEvents(store, 5);
       final session = watching(
-        since: instance.cursorAt(0).encode(),
+        since: instance.cursorAt(feedBase).encode(),
         batchSize: 2,
       );
       await settle();
@@ -223,7 +243,7 @@ void main() {
     });
 
     test('replays nothing, and still says ready, on an empty feed', () async {
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
 
       // The blank-screen case. `ready` arrives with no delta before it...
@@ -245,7 +265,7 @@ void main() {
       // for a different reason — there IS a backlog, and it is deliberately
       // skipped because the consumer asked to start now.
       expect(typesOf(session.frames), ['ready']);
-      expect(session.frames.single.cursor, instance.cursorAt(3));
+      expect(session.frames.single.cursor, instance.cursorAt(feedBase + 3));
 
       final fresh = appendEvent(store, 'n', kind: 'spawned');
       driver.wake();
@@ -259,7 +279,7 @@ void main() {
   group('ready', () {
     test('arrives after the replay and before any live delta', () async {
       final seqs = appendEvents(store, 2);
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
       expect(typesOf(session.frames), ['delta', 'ready']);
 
@@ -284,7 +304,7 @@ void main() {
     test('is never preceded by a heartbeat, however early one ticks', () async {
       appendEvents(store, 400);
       final session = watching(
-        since: instance.cursorAt(0).encode(),
+        since: instance.cursorAt(feedBase).encode(),
         batchSize: 1,
       );
       driver.beat();
@@ -306,7 +326,7 @@ void main() {
 
   group('heartbeat', () {
     test('fires on a stream where nothing at all is happening', () async {
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
       expect(typesOf(session.frames), ['ready']);
 
@@ -324,7 +344,10 @@ void main() {
       expect(beats, hasLength(2));
       // Each carries the CURRENT cursor and its own instant, so a consumer
       // computes staleness from a measured time and never estimates one.
-      expect(beats.map((b) => b.cursor), everyElement(instance.cursorAt(0)));
+      expect(
+        beats.map((b) => b.cursor),
+        everyElement(instance.cursorAt(feedBase)),
+      );
       expect(beats.map((b) => b.sentAt), [
         beat0.add(const Duration(seconds: 15)),
         beat0.add(const Duration(seconds: 30)),
@@ -334,18 +357,18 @@ void main() {
     });
 
     test('is not starved by a busy stream, and tracks its cursor', () async {
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
 
       // The paired positive of the idle case: traffic must not push the beat
       // out. A heartbeat that a busy tree can starve is not a liveness
       // signal, so this asserts one lands BETWEEN the deltas.
-      final first = appendEvent(store, 'a', kind: 'spawned');
+      final first = appendEvent(store, 'node-0', kind: 'spawned');
       driver.wake();
       await settle();
       driver.beat();
       await settle();
-      final second = appendEvent(store, 'b', kind: 'spawned');
+      final second = appendEvent(store, 'node-1', kind: 'spawned');
       driver.wake();
       await settle();
       driver.beat();
@@ -365,7 +388,7 @@ void main() {
     });
 
     test('a wake-up with no new events emits no frame at all', () async {
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
       driver.wake();
       driver.wake();
@@ -388,7 +411,7 @@ void main() {
 
   group('bye', () {
     test('carries a reason on orderly shutdown, and ends the stream', () async {
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       final done = session.sub.asFuture<void>();
       final seq = appendEvent(store, 'n', kind: 'spawned');
       driver.wake();
@@ -409,7 +432,7 @@ void main() {
     test(
       'a consumer that cancels gets none — that is the case bye covers',
       () async {
-        final session = watching(since: instance.cursorAt(0).encode());
+        final session = watching(since: instance.cursorAt(feedBase).encode());
         await settle();
         await session.sub.cancel();
         await settle();
@@ -425,7 +448,7 @@ void main() {
       final source = BreakableSource(store);
       appendEvents(store, 2);
       final session = watching(
-        since: instance.cursorAt(0).encode(),
+        since: instance.cursorAt(feedBase).encode(),
         source: source,
       );
       final done = session.sub.asFuture<void>();
@@ -441,7 +464,7 @@ void main() {
       // one does not, and a consumer cannot tell them apart from the bytes.
       expect(bye.reason, ByeReason.error);
       expect(bye.detail, contains('could not be read'));
-      expect(bye.cursor, instance.cursorAt(2));
+      expect(bye.cursor, instance.cursorAt(feedBase + 2));
     });
 
     test('says error when the feed head cannot be read at all', () async {
@@ -479,7 +502,7 @@ void main() {
       expect(bye.detail, contains(testInstanceId));
       // The bye carries THIS daemon's position, which is what the consumer
       // needs in order to start again.
-      expect(bye.cursor, instance.cursorAt(3));
+      expect(bye.cursor, instance.cursorAt(feedBase + 3));
     });
 
     test('accepts the same position from this instance', () async {
@@ -556,7 +579,7 @@ void main() {
 
     test('a session writes nothing to the store', () async {
       final seqs = appendEvents(store, 3);
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       await settle();
       driver.beat();
       driver.wake();
@@ -568,14 +591,14 @@ void main() {
       // watch are all still there, unchanged, and no row was added by the act
       // of reading them.
       expect(store.cursor, seqs.last);
-      expect(store.eventsSince(0).map((e) => e.seq), seqs);
+      expect(store.eventsSince(feedBase).map((e) => e.seq), seqs);
     });
   });
 
   group('the wire', () {
     test('every frame of a session survives an NDJSON round trip', () async {
       appendEvents(store, 2);
-      final session = watching(since: instance.cursorAt(0).encode());
+      final session = watching(since: instance.cursorAt(feedBase).encode());
       final done = session.sub.asFuture<void>();
       await settle();
       driver.beat();

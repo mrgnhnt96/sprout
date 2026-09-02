@@ -1,4 +1,4 @@
-import '../../store.dart';
+import '../values/node.dart';
 import '../protocol/cursor.dart';
 import 'resource.dart';
 import 'spend.dart';
@@ -192,7 +192,7 @@ final class SproutSnapshot {
   /// Reads back what [toJson] wrote.
   ///
   /// This is the decoder `SnapshotFrame` uses, and it lives here rather than
-  /// in `lib/protocol.dart` on purpose: the shape a snapshot has on the wire
+  /// in `protocol.dart` on purpose: the shape a snapshot has on the wire
   /// is written by [toJson] four lines up, and a reader of that shape kept in
   /// another library is a second description of one thing that must stay
   /// equal to the first.

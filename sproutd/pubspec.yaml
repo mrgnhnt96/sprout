@@ -11,6 +11,16 @@ environment:
 dependencies:
   args: ^2.7.0
   path: ^1.9.1
+  # The pure-value half of sprout: the protocol frames, the cursor, the
+  # snapshot values and the four row types. A path dependency and not a
+  # published one — it is this repo's, versioned with it. It exists because a
+  # library that reaches dart:io or dart:ffi cannot be compiled for the
+  # browser, and sprout_ui has to decode the same frames sproutd emits
+  # (finding F-07). `lib/protocol.dart`, `lib/store.dart` and
+  # `lib/snapshot.dart` re-export from it, so nothing inside sproutd had to
+  # change its imports.
+  sprout_protocol:
+    path: ../sprout_protocol
   # Pinned exactly: docs/01-plan.md §13 records these as the versions the
   # single-binary pipeline was verified against, not merely as compatible.
   revali_router: 5.1.1

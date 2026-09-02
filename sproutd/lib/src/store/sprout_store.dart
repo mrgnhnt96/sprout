@@ -2,10 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:sprout_protocol/values.dart';
 import 'package:sqlite3/sqlite3.dart';
 
-import 'event.dart';
-import 'node.dart';
 import 'schema.dart';
 
 /// Thrown when the tree query does not account for every node exactly once.

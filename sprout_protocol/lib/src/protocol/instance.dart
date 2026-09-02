@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
-import '../../store.dart';
+import '../values/event.dart';
 import 'cursor.dart';
 
 /// The instance a cursor belongs to, as far as the wire is concerned.
@@ -144,16 +144,36 @@ class SproutInstance {
   /// add. Not a security boundary — this class says as much, the id is public
   /// and rides in every frame — and the input is a path plus a row that
   /// already exists, so there is nothing here to be preimage-resistant about.
+  ///
+  /// **[BigInt] and not `int`, because this library is compiled for the
+  /// browser too.** Dart's `int` is 64-bit on the VM and a JavaScript double
+  /// on the web, where integers above 2^53 do not exist. The offset basis
+  /// alone is a compile error there — *"The integer literal
+  /// 0xcbf29ce484222325 can't be represented exactly"* — and the wrapping
+  /// 64-bit multiply below would silently disagree with the VM even if it
+  /// were not. Both halves matter, and the second is the worse one: a browser
+  /// that derived a *different* id from the same feed would have every cursor
+  /// it offered refused as foreign, which is finding F-01's failure arriving
+  /// by a new road.
+  ///
+  /// So the arithmetic is exact on both platforms, and
+  /// `protocol_test.dart` pins the output of a fixed input rather than only
+  /// its self-consistency — an id that agrees with itself on one platform is
+  /// exactly what a divergence looks like from inside that platform.
   static String _idFor(String text) {
-    var hash = 0xcbf29ce484222325;
+    var hash = _fnvOffsetBasis;
     for (final byte in utf8.encode(text)) {
-      hash = (hash ^ byte) * 0x100000001b3;
+      hash = ((hash ^ BigInt.from(byte)) * _fnvPrime) & _mask64;
     }
-    final high = (hash >> 32) & 0xffffffff;
-    final low = hash & 0xffffffff;
-    return high.toRadixString(16).padLeft(8, '0') +
-        low.toRadixString(16).padLeft(8, '0');
+    return hash.toRadixString(16).padLeft(Cursor.instanceIdLength, '0');
   }
+
+  static final BigInt _mask64 = (BigInt.one << 64) - BigInt.one;
+  static final BigInt _fnvOffsetBasis = BigInt.parse(
+    'cbf29ce484222325',
+    radix: 16,
+  );
+  static final BigInt _fnvPrime = BigInt.parse('100000001b3', radix: 16);
 
   /// Names the first thing wrong with [text], so the message is about the
   /// value rather than about the concept.

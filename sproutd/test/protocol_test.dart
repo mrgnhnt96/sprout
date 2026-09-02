@@ -97,6 +97,43 @@ void main() {
       expect(Cursor.isWellFormedInstanceId(id), isTrue);
     });
 
+    test('the derivation is pinned, not merely self-consistent', () {
+      // The pair the two tests around this one cannot be: both of those ask
+      // whether the derivation agrees WITH ITSELF, and a hash that computed
+      // something different on another platform would satisfy every one of
+      // them from inside that platform.
+      //
+      // This matters now because `SproutInstance` is compiled twice. It moved
+      // into `package:sprout_protocol` so the browser could decode the same
+      // frames sproutd emits (finding F-07), and Dart's `int` is 64-bit on the
+      // VM and a JavaScript double on the web. The FNV-1a offset basis alone
+      // does not survive that — `0xcbf29ce484222325` is a compile error under
+      // dart2js — and the wrapping multiply would disagree silently even if it
+      // did. `_idFor` therefore uses BigInt, which is exact on both.
+      //
+      // A browser deriving a DIFFERENT id from the same feed would have every
+      // cursor it offered refused as foreign: finding F-01's failure arriving
+      // by a new road. This value is what the pre-split native-int
+      // implementation computed for this input, so the split is asserted to
+      // have changed nothing.
+      expect(
+        SproutInstance.forFeed(
+          databasePath: '/tmp/sprout.db',
+          firstEvent: SproutEvent(
+            seq: 1,
+            nodeId: 'node-a',
+            ts: DateTime.utc(2026, 1, 2, 3, 4, 5),
+            kind: 'spawned',
+            payload: const {},
+          ),
+        ).id,
+        _pinnedFeedId,
+        reason:
+            'the instance id derivation changed. Every cursor already in a '
+            "consumer's hands is now refused as foreign",
+      );
+    });
+
     test('and changes when the feed or the file does', () {
       // The pair (INV8). "Agrees" is worthless without this: an id that were
       // constant would also agree, and would then accept a cursor at seq 412
@@ -729,3 +766,10 @@ void main() {
     });
   });
 }
+
+/// What `_idFor` computes for the fixed input above.
+///
+/// Captured from the native-int implementation that predates the
+/// `sprout_protocol` split, so this is a claim about continuity and not just
+/// about the current code agreeing with itself.
+const String _pinnedFeedId = 'af1a355b65886dd7';

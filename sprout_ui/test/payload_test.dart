@@ -11,6 +11,7 @@ const payload = ['index.html', 'main.css', 'main.client.dart.js'];
 
 void main() {
   late Directory out;
+  late String log;
 
   setUpAll(() async {
     // Runs the real build rather than inspecting a leftover one. A stale
@@ -32,7 +33,30 @@ void main() {
       0,
       reason: 'jaspr build failed:\n${result.stdout}\n${result.stderr}',
     );
+    log = '${result.stdout}\n${result.stderr}';
     out = Directory('build/jaspr');
+  });
+
+  test('build_web_compilers did not skip the entrypoint', () {
+    // The MECHANISM, asserted next to the artifact, because the two fail
+    // apart. This is finding F-07 in one line: reaching a library that imports
+    // dart:io or dart:ffi through the transitive import graph downgrades the
+    // refusal to a WARNING, and the build still exits 0.
+    //
+    // The test below catches that today by finding no bundle. This one catches
+    // it even if the build were ever to leave a stale bundle behind, and it
+    // names the reason rather than the symptom — which is the difference
+    // between a failure someone can act on and one they have to investigate.
+    expect(
+      log,
+      isNot(contains('Skipping compiling')),
+      reason:
+          'build_web_compilers skipped the entrypoint. Something in the '
+          'import graph of lib/main.client.dart now reaches a dart: library '
+          'the browser does not have. That is F-07: it is a WARNING, the '
+          'build still exits 0, and the page is left loading a script that '
+          '404s.',
+    );
   });
 
   test('the build emits the client bundle, and it is not empty', () {

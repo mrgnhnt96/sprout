@@ -1,4 +1,4 @@
-import '../../store.dart';
+import '../values/node.dart';
 
 /// Something a node is holding, together with **who** is holding it.
 ///
@@ -71,7 +71,7 @@ const String nothingHeldText = 'holds nothing';
 /// The resources [nodes] are holding right now.
 ///
 /// **Derived, and only from what sprout actually records.** There is no lock
-/// table in the schema (`lib/src/store/schema.dart` has `node` and `event` and
+/// table in the schema (`sproutd/lib/src/store/schema.dart` has `node` and `event` and
 /// nothing else), and there will not be one before Phase 4 gives children
 /// their own worktrees. The one single-consumer resource sprout can observe
 /// today is the directory a live node is working in: `node.project`, held by

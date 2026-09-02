@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import '../../store.dart';
+import '../values/event.dart';
 import '../snapshot/snapshot.dart';
 import 'cursor.dart';
 
@@ -158,7 +158,7 @@ sealed class ProtocolFrame {
 /// special-case `type == "snapshot"` before it could use one decoder
 /// ([ProtocolFrame.decodeLine]) for the rest. That was finding F-04.
 ///
-/// It carries a [SproutSnapshot] — **the type `lib/snapshot.dart` already
+/// It carries a [SproutSnapshot] — **the type `snapshot.dart` already
 /// owns**, not a second description of one. Encoding is
 /// `SproutSnapshot.toJson` with a `type` added, decoding is
 /// `SproutSnapshot.fromJson`, and both live beside each other in the snapshot
@@ -352,8 +352,8 @@ final class DeltaFrame extends ProtocolFrame {
   /// consumer's position silently: events out of order, a repeated `seq`, and
   /// a cursor that disagrees with the last event. The feed's `seq` is
   /// monotonic and gapless by construction (the schema's append-only triggers
-  /// in `lib/src/store/schema.dart`), so any of these means a caller assembled
-  /// the batch wrongly — and a batch whose cursor runs ahead of its own
+  /// in `sproutd/lib/src/store/schema.dart`), so any of these means a caller
+  /// assembled the batch wrongly — and a batch whose cursor runs ahead of its own
   /// contents makes the consumer skip the difference forever.
   ///
   /// An **empty** batch is allowed. It is a position update with nothing in

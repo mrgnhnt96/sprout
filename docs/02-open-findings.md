@@ -17,53 +17,6 @@ are quoted in the entry.
 
 ## Open
 
-### F-07 — `package:sproutd/protocol.dart` cannot be compiled for the web, and says so silently
-
-**Status: BLOCKING P3-04.** Found by P3-02. The fix is in `sproutd/lib/`, which P3-02 does not own.
-
-`docs/01-plan.md` §13 and P3-02's own brief both assume the browser client will import
-`package:sproutd/protocol.dart` rather than carry a second copy of the wire format — correctly,
-because two independent derivations that must stay equal is what F-01 was. That import does not
-compile for the web today. Observed by building it, not read:
-
-    Skipping compiling sprout_ui|web/main.client.dart with ddc because some of its
-    transitive libraries have sdk dependencies that are not supported on this platform:
-
-    ... -> package:sproutd/protocol.dart -> package:sproutd/src/protocol/frame.dart
-        -> package:sproutd/store.dart -> package:sproutd/src/store/sprout_store.dart
-        (which imports dart:io)
-    ... -> package:sproutd/store.dart -> package:sproutd/src/store/schema.dart
-        -> package:sqlite3/sqlite3.dart -> ... (which imports dart:ffi)
-
-The brief predicted that an *unused* transitive dependency would not be compiled. That reasoning
-does not apply: `frame.dart` genuinely imports `store.dart` for `SproutEvent` and `SproutNode`, and
-`store.dart` re-exports `sprout_store.dart` and `schema.dart` in the same library. The rejection is
-made on the **library import graph**, before any tree-shaking, so an unused symbol does not help.
-
-**The dangerous half is the reporting.** This is a WARNING, not an error. `jaspr build` prints
-`Completed building project`, exits **0**, writes `index.html` and `main.css`, and writes **no**
-`main.client.dart.js` — leaving a page whose one `<script>` 404s. A pipeline that gates on the exit
-code sees a clean build of a UI that cannot run. Note the dependency alone is harmless: declared
-and unimported, the payload builds fine. It is reaching `protocol.dart` from an import that breaks
-it.
-
-`sprout_ui/test/payload_test.dart` is the check that survives this: it asserts the bundle exists,
-is non-empty, and contains this app's own strings. Measured against the failure above, four of its
-five tests fail while `jaspr build` reports success.
-
-**Smallest fix that keeps one definition** (not applied — it is sproutd's to make): lift
-`lib/protocol.dart`, `lib/src/protocol/`, and the pure-value types `protocol` needs out of
-`lib/store.dart` (`SproutEvent`, `SproutNode`, `NodeStatus`, `TreeNode`) into a third package
-depending on neither `dart:io` nor `dart:ffi`, which both `sproutd` and `sprout_ui` then depend on.
-The split point is `sprout_store.dart` and `schema.dart` — the two files that reach the outside
-world — and nothing in `src/protocol/` needs either.
-
-**Do not resolve this by copying the decoder into `sprout_ui`.** That is F-01 again, and it would
-be invisible: two decoders that agree today, in different packages, with no test that compares
-them.
-
----
-
 ### F-08 — The rule-file guard reads command text, so an interpreter heredoc walks past it
 
 **Status: OPEN, and it is game_loop's to fix, not sprout's.** Found this session, by the P3-02
@@ -113,6 +66,40 @@ edit files at all, and a guard that blocks the ordinary path teaches people to r
 
 These are true, cost nothing to know, and would cost real time to rediscover.
 
+- **A non-empty `main.client.dart.js` proves the import graph, not the decoder.** P3-05 gave
+  `sprout_ui/lib/app.dart` a real `import 'package:sprout_protocol/protocol.dart'` and an
+  exhaustive `switch` over `ProtocolFrame`, and the bundle went from *absent* to 109,503 bytes.
+  But `App` is only ever constructed as `const App()` with `frame: null`, so dart2js proves the
+  other branches unreachable and drops them: grepping the built JS finds `sprout-shell` and `The
+  UI payload is served` and **none** of the protocol's own string literals. What the build does
+  prove is the thing F-07 was about — build_web_compilers decides on the *library import graph*
+  before any tree-shaking, and it no longer skips the entrypoint. The whole protocol library is
+  also genuinely front-end compiled, which is how the `BigInt` error above was caught at all.
+  Once P3-04 decodes a real frame, `payload_test.dart` should gain a string fingerprint from the
+  protocol; until then it cannot have one honestly. (P3-05)
+- **`package:sprout_protocol` is compiled for the browser, so its arithmetic has to be.**
+  The split that closed F-07 made `SproutInstance` a web target, and its FNV-1a hash used 64-bit
+  `int` — which is a JavaScript double on the web. `0xcbf29ce484222325` is a *compile error* under
+  dart2js (*"The integer literal ... can't be represented exactly"*), and the wrapping 64-bit
+  multiply would have disagreed with the VM even if the literal had fit. `_idFor` uses `BigInt`,
+  which is exact on both, and `protocol_test.dart` pins the id of a fixed input against the value
+  the pre-split native-int code computed. The pin is the load-bearing half: the tests already there
+  asked only whether the derivation agreed *with itself*, which a divergence satisfies from inside
+  either platform. A browser deriving a different id from the same feed has every cursor it offers
+  refused as foreign — F-01 arriving by a new road. (P3-05)
+- **The web build's failure modes are not one failure mode.** An unsupported `dart:` library in the
+  transitive import graph is a **WARNING**: `jaspr build` exits 0, writes no bundle, and that was
+  F-07. A library that *is* web-safe but does not compile is an **ERROR**: the build exits 1 and
+  says why. Fixing the first converts silence into noise, so the second only becomes visible after
+  the first is repaired — expect a real compile error to appear the moment a graph problem is
+  solved, and do not read it as the split having failed. (P3-05)
+- **Neither gate analyzes `sprout_protocol/`.** Measured by planting a lint in
+  `sprout_protocol/lib/` and running both: `cd sproutd && dart analyze --fatal-infos
+  --fatal-warnings` and `cd sprout_ui && ...` each reported *No issues found*. `dart analyze`
+  covers the package it is run in, not its path dependencies. `dart test` in sproutd *does* execute
+  that code, so behaviour is covered and static quality is not — and only when a commit also
+  touches a path matching an existing rule. `.game_loop/verify.yaml` owes the package a rule; it is
+  write-guarded and P3-05 did not have it. (P3-05)
 - **`jaspr create` scaffolds a project that does not resolve.** Its template pins
   `build_web_compilers: ^4.8.10`, which wants `analyzer >=13.3.0`, while `jaspr_builder 0.23.4`
   wants `analyzer ^12.1.0`. `sprout_ui/pubspec.yaml` holds `build_web_compilers` to

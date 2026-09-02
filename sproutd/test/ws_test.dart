@@ -11,10 +11,9 @@
 /// and that hanging up really tears the session down.
 ///
 /// The route is built here rather than taken from `.revali/server/`, which is
-/// generated and git-ignored, so it cannot be imported by a test that has to
-/// pass on a clean checkout. It mirrors what `revali build` emits verbatim —
-/// `assertions on the generated shape` below reads the generated file when it
-/// is present and fails if the two have drifted, and `docs`/the commit message
+/// generated: importing it would assert the generator against itself. It
+/// mirrors what `revali build` emits verbatim — `assertions on the generated
+/// shape` below reads the generated file and fails if the two have drifted, and `docs`/the commit message
 /// carry the run of the compiled binary, which is the only proof that covers
 /// the annotation itself.
 library;
@@ -816,8 +815,9 @@ void main() {
   group('the generated shape', () {
     // The route under test is hand-built above; this is what keeps it honest
     // against what `revali build` actually emits. The generated tree is
-    // git-ignored, so a clean checkout skips the comparison — and the two
-    // assertions that do not need it run either way.
+    // COMMITTED as of P4-01 — `bin/sprout.dart` imports it to be the daemon as
+    // well as the CLI — so the comparison no longer skips itself on a clean
+    // checkout. `test/ui_test.dart` holds the assertion that it stays tracked.
     // `__api_tree_route.dart` and not `__tree_route.dart`: revali names the
     // file after the controller's path, and P3-03 moved `api` out of the app
     // prefix and into `@Controller(treeControllerPath)` so the UI could answer
@@ -870,14 +870,13 @@ void main() {
       );
     });
 
-    test('revali build agrees, when it has been run', () {
-      if (!generated.existsSync()) {
-        markTestSkipped(
-          '.revali/ is git-ignored; run `dart run revali build` to check the '
-          'generated shape against the route this file builds by hand',
-        );
-        return;
-      }
+    test('revali build agrees with the route built by hand above', () {
+      expect(
+        generated.existsSync(),
+        isTrue,
+        reason:
+            '.revali/ is committed and missing; run `dart run revali build`',
+      );
       final source = generated.readAsStringSync();
       expect(source, contains('mode: WebSocketMode.twoWay'));
       expect(source, contains('onConnect:'));

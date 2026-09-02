@@ -20,9 +20,11 @@
 /// end to end, which is the one thing unit tests on either side cannot check.
 ///
 /// Both read the store directly rather than through the daemon, because there
-/// is no daemon in the loop yet. That has one consequence worth naming here:
-/// see [instanceOf] for why the cursor's instance id is a fingerprint of the
-/// event feed rather than [SproutInstance.current].
+/// is no daemon in the loop yet. That costs nothing on the wire: the cursor's
+/// instance id is a fingerprint of the event feed rather than of a process
+/// (`SproutInstance.forFeed`), so a cursor this CLI mints is the same cursor
+/// the daemon's socket mints against the same database, and the two surfaces
+/// join.
 ///
 /// The CLI writes the same SQLite file the daemon reads (WAL mode, so both
 /// can be open at once), and it honours the same `SPROUT_DB` variable.
@@ -341,10 +343,10 @@ const String databaseOptionHelp =
 ///
 /// `--db`, then `$SPROUT_DB` (empty treated as unset, because an exported-but-
 /// blank variable is how a shell says nothing rather than how it says ""),
-/// then `~/.sprout/sprout.db`. Always absolute: a relative path would make the
-/// cursor's instance id depend on the process's working directory, and two
-/// consumers of one database would then refuse each other's cursors. See
-/// [instanceOf].
+/// then `~/.sprout/sprout.db`. Absolute, because the path is what gets opened
+/// and what error messages name. `SproutStore.databasePath` absolutises again
+/// rather than trusting this, since the instance id is derived from it and a
+/// relative value there would make a cursor depend on the working directory.
 String resolveDatabasePath({
   required String? option,
   required Map<String, String> environment,
@@ -358,56 +360,22 @@ String resolveDatabasePath({
   );
 }
 
-/// The instance a CLI process hands out cursors from.
+/// The instance this CLI hands out cursors from.
 ///
-/// **Not [SproutInstance.current], and the difference is the point.** That one
-/// is generated per process, which is right for a daemon that outlives its
-/// consumers and wrong for a CLI: `sprout snapshot` and `sprout watch` are two
-/// processes, so `snapshot`'s cursor would be refused by `watch` as foreign
-/// every single time, and the protocol's whole promise — that the two join on
-/// the cursor — could never be kept from a shell.
+/// Plumbing, not a derivation: the rule lives in [SproutInstance.forFeed] and
+/// this only hands it the two facts the store already knows. The daemon's
+/// `daemonInstanceFor` is the same one line for the same reason —
+/// `sprout snapshot`, `sprout watch` and the daemon's socket are three
+/// processes that must arrive at one id, and they do it by calling one
+/// derivation rather than by keeping two in step.
 ///
-/// What is namespaced here is therefore the thing that actually owns the seq
-/// space: **this event feed, in this file**. The id is a hash of the absolute
-/// database path together with the identity of the feed's *first* event —
-/// which is append-only, so it never changes while the feed is the same feed,
-/// and is a different row the moment the file is replaced. That keeps the
-/// property the instance id exists for: a cursor at seq 412 taken against a
-/// database that has since been deleted and recreated at the same path is
-/// **refused**, rather than silently resumed at a 412 that now means something
-/// else. Deriving the id from the path alone would lose exactly that.
-///
-/// An empty feed fingerprints as empty and so changes id once the first event
-/// lands. A cursor from it is at position 0 and would have been safe to
-/// resume, so this errs toward a refusal — which names both ids and says to
-/// take a fresh snapshot — rather than toward a silent resume. That is the
-/// direction the protocol errs in everywhere else too.
-SproutInstance instanceOf(SproutStore store, {required String databasePath}) {
-  final first = store.eventsSince(0, limit: 1);
-  final feed = first.isEmpty
-      ? 'empty'
-      : '${first.single.seq} ${first.single.ts.toUtc().toIso8601String()}'
-            ' ${first.single.nodeId} ${first.single.kind}';
-  return SproutInstance(instanceIdFor('$databasePath $feed'));
-}
-
-/// A 16-lowercase-hex-character id for [text]: FNV-1a, 64 bits, big-endian.
-///
-/// Written out rather than taken from `package:crypto`, which this package
-/// does not depend on and which only the leaf that owns `pubspec.yaml` may
-/// add. Not a security boundary — [SproutInstance] says as much, the id is
-/// public and rides in every frame — and the input is a path plus a row that
-/// already exists, so there is nothing here to be preimage-resistant about.
-String instanceIdFor(String text) {
-  var hash = 0xcbf29ce484222325;
-  for (final byte in utf8.encode(text)) {
-    hash = (hash ^ byte) * 0x100000001b3;
-  }
-  final high = (hash >> 32) & 0xffffffff;
-  final low = hash & 0xffffffff;
-  return high.toRadixString(16).padLeft(8, '0') +
-      low.toRadixString(16).padLeft(8, '0');
-}
+/// Derived per call rather than held: while the feed is empty the id is the
+/// empty-feed one, and it changes when the first event lands. A CLI process
+/// that cached it would drift from a daemon that did not.
+SproutInstance instanceForStore(SproutStore store) => SproutInstance.forFeed(
+  databasePath: store.databasePath,
+  firstEvent: store.firstEvent,
+);
 
 /// `sprout snapshot [--json]` — the whole world, one call, one cursor.
 final class SnapshotCommand extends Command<int> {
@@ -465,7 +433,7 @@ final class SnapshotCommand extends Command<int> {
     try {
       final snapshot = takeSnapshot(
         StoreSnapshotSource(store),
-        instance: instanceOf(store, databasePath: dbPath),
+        instance: instanceForStore(store),
       );
       out.writeln(
         results['json'] as bool
@@ -564,7 +532,7 @@ final class WatchCommand extends Command<int> {
     try {
       return await _watch(
         store: store,
-        instance: instanceOf(store, databasePath: dbPath),
+        instance: instanceForStore(store),
         since: results['since'] as String?,
         asJson: results['json'] as bool,
         replayOnly: results['replay-only'] as bool,

@@ -15,35 +15,6 @@ are quoted in the entry.
 
 ---
 
-## F-01 — The CLI and the daemon do not agree on an instance id
-
-**Status:** BLOCKING Phase 3 · **Found by:** P2-04, confirmed by P2-05 · **Fix lives in:**
-`sproutd/lib/protocol.dart`
-
-`SproutInstance.current` is generated **per process**. `sprout snapshot` and the daemon are
-different processes, so the cursor a user copies out of `sprout snapshot` is refused by the
-WebSocket as foreign, every time. The join that the whole protocol exists to protect — take a
-snapshot, then apply deltas from its cursor — is broken between the two surfaces sprout actually
-ships.
-
-P2-04 hit this first and it nearly made its own leaf impossible: `snapshot` and `watch` are also
-two processes, so every cursor the CLI minted would have been refused by the CLI itself. Its
-workaround, in `bin/sprout.dart`, derives the id from a hash of the **absolute database path** plus
-the identity of the feed's **first** event. The feed is append-only, so that id is stable while it
-is the same feed, and it changes the moment the file is replaced — meaning a database deleted and
-recreated at the same path is still correctly refused.
-
-**The fix** is lifting that derivation into `lib/protocol.dart` as `SproutInstance.forStore(...)`
-and calling it from both `bin/` and the controller. **Do not fork a second hash that happens to
-agree today** — two independent derivations that must stay equal is the bug, not the repair.
-
-**Already pinned:** `sproutd/test/ws_test.dart` carries a test named *"the CLI and the daemon do not
-agree on an instance id so a cursor sprout snapshot minted is refused by the socket"*. It asserts
-today's broken behaviour on purpose, so it **fails the day the fix lands** and cannot be forgotten.
-Update it in the same commit.
-
----
-
 ## F-02 — Creating a subagent node appends no event
 
 **Status:** BLOCKING Phase 3 · **Found by:** P2-04's end-to-end test · **Fix lives in:**

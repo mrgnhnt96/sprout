@@ -25,10 +25,15 @@ const String totalCostUsdField = 'total_cost_usd';
 
 /// Takes the whole world in one call, at one cursor.
 ///
-/// [instance] defaults to [SproutInstance.current], so a `snapshot` and a
-/// `watch` in the same process hand out cursors from the same namespace
-/// without either being told which. [now] is the clock, injectable so a test
-/// can assert on a rendered age instead of racing one.
+/// [instance] is required and has no default. A [SnapshotSource] is not
+/// enough to derive one from — only a caller holding the store knows the
+/// database path and the feed's first event — and the default that used to be
+/// here, `SproutInstance.current`, was finding F-01: a per-process id meant
+/// `sprout snapshot`'s cursor was refused by the daemon's socket every time.
+/// A default that is still wrong is still the bug, so callers now name the
+/// instance (`SproutInstance.forFeed`) rather than inherit one. [now] is the
+/// clock, injectable so a test can assert on a rendered age instead of racing
+/// one.
 ///
 /// This never throws for an unreadable **feed**: that outcome is reported in
 /// the snapshot as [SproutSnapshot.journalUnreadable], because a caller who
@@ -39,10 +44,9 @@ const String totalCostUsdField = 'total_cost_usd';
 /// a degraded snapshot, it is not a snapshot.
 SproutSnapshot takeSnapshot(
   SnapshotSource source, {
-  SproutInstance? instance,
+  required SproutInstance instance,
   DateTime Function()? now,
 }) {
-  final id = instance ?? SproutInstance.current;
   final takenAt = (now ?? DateTime.now)().toUtc();
 
   // The feed first, then the graph. The order is load-bearing and the argument
@@ -66,7 +70,7 @@ SproutSnapshot takeSnapshot(
   final subtreeCounts = _countSubtrees(tree, ownCostUsd.keys.toSet());
 
   return SproutSnapshot(
-    cursor: id.cursorAt(feed.position),
+    cursor: instance.cursorAt(feed.position),
     takenAt: takenAt,
     nodes: [
       for (final entry in _depthFirst(tree))

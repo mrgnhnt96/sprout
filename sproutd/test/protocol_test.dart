@@ -27,19 +27,78 @@ void main() {
   setUp(() => instance = SproutInstance('0123456789abcdef'));
 
   group('instance id', () {
-    test('is stable for the process, and two generated ids differ', () {
-      // The positive: `current` is one fact per process. Read twice, and a
-      // snapshot and a watch reading it separately must agree.
-      expect(identical(SproutInstance.current, SproutInstance.current), isTrue);
-      expect(SproutInstance.current.id, SproutInstance.current.id);
-
-      // The pair (INV8): "stable" proves nothing unless the generator can also
-      // produce something different. If `generate` returned a constant, the
-      // assertion above would pass and the cursor's whole namespace would be
-      // one value machine-wide.
+    test('two generated ids differ', () {
+      // `generate` is what a test uses when it wants a namespace nobody else
+      // can compute. If it returned a constant, the cursor's whole namespace
+      // would be one value machine-wide and every foreign cursor would be
+      // accepted.
       final ids = {for (var i = 0; i < 32; i++) SproutInstance.generate().id};
       expect(ids, hasLength(32));
       expect(ids.every(Cursor.isWellFormedInstanceId), isTrue);
+    });
+
+    test('derived from a feed, the same feed gives the same id', () {
+      // This is finding F-01 stated as an assertion at the derivation itself.
+      // The CLI and the daemon are different processes; they agree only
+      // because two independent calls with the same inputs land on the same
+      // id. `ws_test.dart` asserts the same property across the two real
+      // surfaces; here it is the derivation alone.
+      final first = anEvent(1);
+      final id = SproutInstance.forFeed(
+        databasePath: '/tmp/sprout.db',
+        firstEvent: first,
+      ).id;
+
+      expect(
+        SproutInstance.forFeed(
+          databasePath: '/tmp/sprout.db',
+          firstEvent: anEvent(1),
+        ).id,
+        id,
+        reason:
+            'a second process reading the same feed must derive the same '
+            'id, or a cursor cannot cross between them',
+      );
+      expect(Cursor.isWellFormedInstanceId(id), isTrue);
+    });
+
+    test('and changes when the feed or the file does', () {
+      // The pair (INV8). "Agrees" is worthless without this: an id that were
+      // constant would also agree, and would then accept a cursor at seq 412
+      // taken against a database that has since been replaced.
+      final id = SproutInstance.forFeed(
+        databasePath: '/tmp/sprout.db',
+        firstEvent: anEvent(1),
+      ).id;
+
+      // A different file at the same instant.
+      expect(
+        SproutInstance.forFeed(
+          databasePath: '/tmp/other.db',
+          firstEvent: anEvent(1),
+        ).id,
+        isNot(id),
+      );
+      // The same path, but the feed's first row is a different row — which is
+      // what a database deleted and recreated at that path looks like.
+      expect(
+        SproutInstance.forFeed(
+          databasePath: '/tmp/sprout.db',
+          firstEvent: anEvent(1, kind: 'runner.spawned'),
+        ).id,
+        isNot(id),
+      );
+      // And an empty feed is its own fingerprint, so the id changes once the
+      // first event lands. A cursor from an empty feed is at position 0 and
+      // would have been safe to resume; this errs toward the refusal, which
+      // names both ids, rather than toward a silent resume.
+      expect(
+        SproutInstance.forFeed(
+          databasePath: '/tmp/sprout.db',
+          firstEvent: null,
+        ).id,
+        isNot(id),
+      );
     });
 
     test('refuses an id that is not a well-formed instance id', () {

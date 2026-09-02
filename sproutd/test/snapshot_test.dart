@@ -474,9 +474,26 @@ void main() {
       );
     });
 
-    test('defaults to this process\'s instance', () {
-      final snapshot = takeSnapshot(StoreSnapshotSource(store));
-      expect(snapshot.cursor.instanceId, SproutInstance.current.id);
+    test('carries the instance derived from the store it read', () {
+      // `takeSnapshot` has no default instance and cannot have one: a
+      // `SnapshotSource` does not know the database path or the feed's first
+      // row, and the default that used to be here — a per-process id — was
+      // finding F-01. A caller holding the store derives it, and two callers
+      // holding the same store derive the same one.
+      final instance = SproutInstance.forFeed(
+        databasePath: store.databasePath,
+        firstEvent: store.firstEvent,
+      );
+      final snapshot = takeSnapshot(
+        StoreSnapshotSource(store),
+        instance: instance,
+      );
+      expect(snapshot.cursor.instanceId, instance.id);
+      expect(
+        instance.accept(snapshot.cursor.encode()),
+        isA<CursorAccepted>(),
+        reason: 'a snapshot must hand back a cursor its own instance accepts',
+      );
     });
 
     test('fixes the feed at one position, ahead of which nothing is read', () {

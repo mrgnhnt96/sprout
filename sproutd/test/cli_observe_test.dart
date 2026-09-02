@@ -389,8 +389,9 @@ void main() {
 
         // 4. The deltas, taken by a fourth process, resuming from step 1's
         //    cursor. That a cursor minted in one process is accepted in
-        //    another is the whole promise: see `instanceOf` in bin/sprout.dart
-        //    for why SproutInstance.current cannot deliver it.
+        //    another is the whole promise: see `SproutInstance.forFeed` in
+        //    lib/protocol.dart, which namespaces the cursor by the feed rather
+        //    than by the process, and which the daemon's socket calls too.
         final watched = await cliProcess([
           'watch',
           '--db',

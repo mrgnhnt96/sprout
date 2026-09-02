@@ -85,7 +85,15 @@ sealed class HookRecord {
 /// have to model that with nullable fields anyway, and would then also have to
 /// decide what to do with the twelfth event name, which is the one decision
 /// this file most needs not to get wrong.
-final class HookPayload extends HookRecord {
+///
+/// `base` rather than `final` so that one specialisation can exist:
+/// `UserPromptSubmitPayload` in `package:sproutd/stream.dart` extends this to
+/// add the `<task-notification>` classification and nothing else. It used to
+/// declare six of the accessors below a second time over the same wire fields,
+/// which was finding F-14. `base` still forbids implementing this class, so
+/// nothing outside can fake a payload; it only permits extending it, and only
+/// by another `base`, `final` or `sealed` class.
+base class HookPayload extends HookRecord {
   /// Wraps a decoded payload.
   const HookPayload(this.raw);
 

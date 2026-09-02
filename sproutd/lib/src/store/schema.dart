@@ -90,7 +90,26 @@ void _v1(Database db) {
 /// Every migration runs inside one transaction with its own version stamp, so
 /// an interrupted upgrade leaves the file at the last version that fully
 /// applied rather than at a half-applied shape no migration knows how to fix.
+///
+/// **Safe to run from several processes against one file at once**, which is
+/// not what it used to be and is not a detail: since P8-03 a hook is one OS
+/// process per event, and the first events of a session arrive within
+/// milliseconds of each other onto a `~/.sprout/` that may not exist yet. The
+/// old shape read the version *before* `BEGIN`, and `BEGIN` is deferred — so
+/// two processes both read 0, both decided to run migration 1, and the loser
+/// died on `table node already exists`. Measured with eight concurrent
+/// `sprout hook` processes against a fresh database: **six of the eight failed
+/// to open the store at all** and their payloads were never recorded.
+/// `busy_timeout` cannot help, because that is not a lock conflict — it is a
+/// logic error produced by a decision taken outside the lock.
+///
+/// So every pass takes the write lock with `BEGIN IMMEDIATE` and reads the
+/// version underneath it. A process that lost the race sees the version the
+/// winner just wrote and applies nothing.
 void migrate(Database db) {
+  // Idempotent and a single statement, so it needs no transaction of its own:
+  // concurrent callers serialise on the write lock and `IF NOT EXISTS` makes
+  // the loser a no-op rather than an error.
   db.execute('''
     CREATE TABLE IF NOT EXISTS schema_version (
       version     INTEGER PRIMARY KEY,
@@ -98,24 +117,42 @@ void migrate(Database db) {
     )
   ''');
 
+  while (_applyNextMigration(db)) {}
+
+  // Read after the loop rather than before it: a database from a newer build
+  // applies no migrations, falls straight out, and is reported here. Checking
+  // first would have to read the version outside the lock, which is the race
+  // this function exists to have fixed.
   final found = readSchemaVersion(db);
   if (found > currentSchemaVersion) {
     throw SchemaVersionError(found: found, supported: currentSchemaVersion);
   }
+}
 
-  for (var version = found + 1; version <= migrations.length; version++) {
-    db.execute('BEGIN');
-    try {
-      migrations[version - 1](db);
-      db.execute(
-        'INSERT INTO schema_version (version, applied_at) VALUES (?, ?)',
-        [version, DateTime.now().toUtc().toIso8601String()],
-      );
+/// Applies the one migration [db] is missing, or returns false if it is not.
+///
+/// `BEGIN IMMEDIATE` rather than `BEGIN`: it takes the write lock at the
+/// statement rather than at the first write, so the version read below happens
+/// under it and no two processes can act on the same answer. It respects
+/// `busy_timeout`, so a process meeting a held lock waits its turn.
+bool _applyNextMigration(Database db) {
+  db.execute('BEGIN IMMEDIATE');
+  try {
+    final found = readSchemaVersion(db);
+    if (found >= migrations.length) {
       db.execute('COMMIT');
-    } on Object {
-      db.execute('ROLLBACK');
-      rethrow;
+      return false;
     }
+    migrations[found](db);
+    db.execute(
+      'INSERT INTO schema_version (version, applied_at) VALUES (?, ?)',
+      [found + 1, DateTime.now().toUtc().toIso8601String()],
+    );
+    db.execute('COMMIT');
+    return true;
+  } on Object {
+    db.execute('ROLLBACK');
+    rethrow;
   }
 }
 

@@ -124,6 +124,15 @@ class SproutStore {
   static const int busyTimeoutMillis = 5000;
 
   static void _configure(Database db) {
+    // **First, and the order is load-bearing.** `PRAGMA journal_mode = WAL`
+    // takes the database's write lock to rewrite the header, so it is itself a
+    // statement that can meet another connection's lock and come back
+    // `SQLITE_BUSY`. Set after WAL, the timeout would not be in effect for the
+    // one statement in `_configure` that needs it, and two `sprout hook`
+    // processes opening the same fresh file at the same instant would have one
+    // of them fail to open at all. Per connection, and zero by default. See
+    // [busyTimeoutMillis].
+    db.execute('PRAGMA busy_timeout = $busyTimeoutMillis');
     // WAL is what lets `sprout status` read while the daemon writes. It is
     // persistent in the file, so it survives reopening, and it is a no-op that
     // reports `memory` for an in-memory database.
@@ -131,8 +140,6 @@ class SproutStore {
     // Off by default in SQLite, per connection, and never inherited from the
     // file — so it has to be set on every connection, including a reader's.
     db.execute('PRAGMA foreign_keys = ON');
-    // Per connection too, and zero by default. See [busyTimeoutMillis].
-    db.execute('PRAGMA busy_timeout = $busyTimeoutMillis');
   }
 
   /// The default location: `~/.sprout/sprout.db`.

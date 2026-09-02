@@ -1,6 +1,7 @@
 /// The ring cap, and the reset that is the half which makes it safe.
 library;
 
+import '../../liveness.dart';
 import 'contradiction.dart';
 
 /// How many consecutive unproductive rings one node gets before it is
@@ -27,6 +28,8 @@ final class RingRuling {
   /// Records a decision and the sentence behind it.
   const RingRuling({
     required this.nodeId,
+    required this.liveness,
+    required this.because,
     required this.outcome,
     required this.consecutiveRings,
     required this.why,
@@ -34,6 +37,26 @@ final class RingRuling {
 
   /// The node ruled on.
   final String nodeId;
+
+  /// Which contradiction was ruled on: [Liveness.stalled] or
+  /// [Liveness.abandoned].
+  ///
+  /// Carried on the ruling and not only on [Ring], because a **silenced**
+  /// ruling never becomes a [Ring] and a silenced node is still contradicted.
+  /// P6-03's board reads the current stall set off `SweepRecord.rang` *and*
+  /// `SweepRecord.silenced`, and without this a node would lose its verdict
+  /// from the board on the sweep the cap first silenced it — the board going
+  /// quiet about a node precisely because the watchdog had rung about it three
+  /// times, which is the failure the cap's own reset exists to avoid.
+  final Liveness liveness;
+
+  /// The measurement's own sentence, carried through unedited.
+  ///
+  /// Distinct from [why], which is the *ledger's* sentence about ringing.
+  /// This one is the measurement's about the node, and a board that showed
+  /// only the former would tell a human they had been rung at three times
+  /// without ever telling them what was observed.
+  final String because;
 
   /// Ring, or stay silent.
   final RingOutcome outcome;
@@ -139,6 +162,8 @@ final class RingLedger {
     if (state.rings >= cap) {
       return RingRuling(
         nodeId: nodeId,
+        liveness: contradiction.liveness,
+        because: contradiction.because,
         outcome: RingOutcome.silenced,
         consecutiveRings: state.rings,
         why:
@@ -153,6 +178,8 @@ final class RingLedger {
     state.mark = mark;
     return RingRuling(
       nodeId: nodeId,
+      liveness: contradiction.liveness,
+      because: contradiction.because,
       outcome: RingOutcome.rang,
       consecutiveRings: state.rings,
       why:

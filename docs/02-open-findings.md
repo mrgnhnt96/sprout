@@ -96,42 +96,6 @@ rename or a moved payload key fails a test rather than silently making every nod
 `abandoned` — which is the failure a green suite cannot otherwise see, because both sides would
 still compile and every liveness test would still pass against its own constant.
 
-### F-13 — `Liveness.pages` says `unmeasured` pages; the watchdog decided it must not
-
-**Status: OPEN, and it is a disagreement to settle rather than a bug to fix.** Found by the P6-02
-Crawler, which is `Liveness.pages`'s first consumer — and does not consume it. **Both sides live
-in** `sproutd/lib/src/liveness/verdict.dart` (the getter) and
-`sproutd/lib/src/watchdog/contradiction.dart` (`ringingVerdicts`).
-
-P6-01 shipped `Liveness.pages` as `stalled || abandoned || unmeasured`, arguing that *"'I could not
-tell' about a node sprout believes is running is a fact worth a human's attention, and treating it
-as quiet is how a blind watchdog reports green."* Nothing consumed it: at the time P6-02 started,
-`grep -rn '\.pages' sproutd` matched only `test/liveness_test.dart`.
-
-P6-02's watchdog rings on a **contradiction** — a node whose recorded state and observed state
-cannot both be true — and `unmeasured` is the absence of an observation, so there is nothing for
-the record to contradict. It therefore does **not** ring on `unmeasured`, and does not use
-`Liveness.pages` at all. The second half of P6-01's argument is kept in full by other means: every
-blind node is named in `SweepRecord.blind` and in the sweep's `why`, the quiet sentence counts only
-the nodes that could actually be looked at, and `SweepRecord` deliberately offers no `healthy`
-getter. A blind sweep reads *"not one of the 2 node(s) could be measured, so this sweep establishes
-nothing about any of them"* — which is neither a ring nor a claim of health.
-
-**Why this is a finding and not just a decision.** Two declarations now answer "should this reach a
-human?" for the same enum, and they disagree on one member. Today only one of them is wired to
-anything, so the disagreement is inert — but the next reader will reasonably assume the getter on
-the enum is the answer. Either `Liveness.pages` should lose `unmeasured` and become the watchdog's
-predicate, or it should be renamed to what it actually means (*worth a human's attention*, which is
-broader than *rings*) so that the two stop looking like the same question.
-
-**Why it was not fixed here.** Editing `verdict.dart` means editing P6-01's file set, and
-`liveness_test.dart` pins `Liveness.unmeasured.pages` as true.
-
-**What is holding the line meanwhile.** `sproutd/test/watchdog_test.dart` asserts both sides in one
-test — `Liveness.unmeasured.pages` is true and `ringingVerdicts` does not contain it — so the
-divergence is a pinned, visible fact rather than something a reader has to notice.
-
----
 
 ---
 

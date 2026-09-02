@@ -52,6 +52,7 @@ import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/stream.dart';
 import 'package:sproutd/watch.dart';
+import 'package:sproutd/watchdog.dart';
 
 // The generated Revali entrypoint, and the app it builds `MainApp` from.
 //
@@ -117,6 +118,64 @@ const int exitPortInUse = 7;
 
 /// Bad arguments. `EX_USAGE` from sysexits.h.
 const int exitUsage = 64;
+
+/// The environment variable naming the watchdog's NDJSON journal.
+///
+/// Unset means the file sits beside the database — one directory holds
+/// everything a run leaves behind, and the journal's own mtime is the
+/// watchdog's pulse, so it wants to be somewhere a person will look with
+/// `ls -l` rather than somewhere only this code knows about.
+const String watchdogLogEnvVariable = 'SPROUT_WATCHDOG_LOG';
+
+/// The file name used when [watchdogLogEnvVariable] is unset.
+const String watchdogLogName = 'watchdog.ndjson';
+
+/// The environment variable overriding the sweep interval, in milliseconds.
+const String watchdogSweepEnvVariable = 'SPROUT_WATCHDOG_SWEEP_MS';
+
+/// The environment variable overriding the freeze threshold, in milliseconds.
+const String watchdogFrozenEnvVariable = 'SPROUT_WATCHDOG_FROZEN_MS';
+
+/// The environment variable overriding the settle wait, in milliseconds.
+const String watchdogSettleEnvVariable = 'SPROUT_WATCHDOG_SETTLE_MS';
+
+/// The journal path [environment] asks for, or one beside [database].
+String watchdogLogPathFor(Map<String, String> environment, String database) {
+  final value = environment[watchdogLogEnvVariable];
+  if (value != null && value.isNotEmpty) return p.absolute(value);
+  return p.join(p.dirname(database), watchdogLogName);
+}
+
+/// The duration [environment] asks for under [key], or [fallback].
+///
+/// **These are knobs, and the defaults are not findings.** `watchdogFrozenAfter`
+/// says so of itself: nothing in the plan, the research or the Phase 0 captures
+/// fixes five minutes, and the sweep interval and settle are borrowed from
+/// `.game_loop/config.json` rather than measured. They are overridable because
+/// a person watching a demo should not have to wait out a threshold that has
+/// no evidence behind it, and because a tree of thirty-second tasks and a tree
+/// of hour-long ones do not want the same numbers.
+///
+/// A value that is set but not a positive integer throws rather than falling
+/// back, for the reason `daemonPortFrom` does: someone set it on purpose, and
+/// quietly running on a different number than they asked for is worse than
+/// refusing to start.
+Duration watchdogDurationFrom(
+  Map<String, String> environment,
+  String key,
+  Duration fallback,
+) {
+  final value = environment[key];
+  if (value == null || value.isEmpty) return fallback;
+  final ms = int.tryParse(value);
+  if (ms == null || ms <= 0) {
+    throw FormatException(
+      '\$$key must be a positive number of milliseconds',
+      value,
+    );
+  }
+  return Duration(milliseconds: ms);
+}
 
 /// The environment variable naming the SQLite file. Shared with the daemon.
 const String databaseEnvVariable = 'SPROUT_DB';
@@ -775,15 +834,135 @@ final class UiCommand extends Command<int> {
 
     await daemon.createServer(server);
 
+    // The watchdog's own store handle, opened here and not taken from the
+    // daemon's DI. Two connections to one WAL database, which is the same
+    // arrangement `sprout run` and `sprout ui` already have and is why the
+    // store opens in WAL at all. The alternative — reaching into revali's DI
+    // from out here — is not available: `createServer` constructs `MainApp`
+    // itself, and the container it fills is not handed back.
+    final SproutStore store;
+    try {
+      store = SproutStore.open(path: database);
+    } on Object catch (error) {
+      await server.close(force: true);
+      err.writeln('sprout: the store at $database could not be opened: $error');
+      return exitStoreUnreadable;
+    }
+
+    final Watchdog watchdog;
+    final FanOutJournal journal;
+    final String log;
+    try {
+      log = watchdogLogPathFor(environment, database);
+      journal = FanOutJournal([
+        // Durable first, and the board second. The file's mtime is the
+        // watchdog's pulse — readable with `ls -l` by something running none
+        // of this code — and the board dies with the process, so a record that
+        // existed only in memory could never tell anyone the process died.
+        FileWatchdogJournal(log),
+        WatchdogBoard.shared,
+      ]);
+      watchdog = Watchdog(
+        store: store,
+        // The page, on stderr, in the daemon's own terminal. Distinct from the
+        // board, which is the surface: §11 asks for both, and a ring that only
+        // ever reached a browser tab nobody had open would not be a page.
+        bell: WritingBell(),
+        journal: journal,
+        interval: watchdogDurationFrom(
+          environment,
+          watchdogSweepEnvVariable,
+          defaultSweepInterval,
+        ),
+        frozenAfter: watchdogDurationFrom(
+          environment,
+          watchdogFrozenEnvVariable,
+          watchdogFrozenAfter,
+        ),
+        settleFor: watchdogDurationFrom(
+          environment,
+          watchdogSettleEnvVariable,
+          defaultSettleFor,
+        ),
+      );
+    } on FormatException catch (error) {
+      store.close();
+      await server.close(force: true);
+      err.writeln('sprout: ${error.message} (got "${error.source}")');
+      return exitUsage;
+    }
+
     // Read off the bound socket, not off `port`. They are the same number
     // here, and printing the socket's own is what keeps that true if it ever
     // stops being.
     out
       ..writeln(_url(server.address.address, server.port))
       ..writeln('db  $database')
+      ..writeln(
+        'watchdog  sweep ${_secs(watchdog.interval)} · '
+        'frozen after ${_secs(watchdog.frozenAfter)} · '
+        'settle ${_secs(watchdog.settleFor)} → $log',
+      )
       ..writeln('Ctrl-C to stop.');
 
-    return _serveUntilInterrupted(server);
+    var askedToStop = false;
+
+    // **Started here, not in `MainApp.onServerStarted`.** The watchdog's
+    // lifetime is the daemon's, and this method is the only thing that owns
+    // the daemon's lifetime: it binds the socket, it closes it, and it is
+    // where a Ctrl-C arrives. `onServerStarted` would also fire under
+    // `revali dev`, giving a hot-reloading dev server a second watchdog on the
+    // same tree with no way to stop it.
+    //
+    // **Unawaited, and its ending is reported rather than swallowed.**
+    // `run()` is documented never to throw from a sweep — every failure path
+    // inside `sweepOnce` ends in a journal entry — but "documented not to" is
+    // not "cannot", and a watchdog that died is exactly the failure this whole
+    // phase exists to catch. So both endings are handled and neither takes the
+    // UI down: a throw is caught here, printed, and written to the journal and
+    // the board as a sweep with a `failure`; and a `run()` that simply returns
+    // without being asked to is treated the same way, because a loop that
+    // stopped quietly is the worse of the two. The daemon keeps serving — a
+    // board with a dead watchdog that says so is more useful than no board.
+    unawaited(
+      watchdog
+          .run()
+          .then<void>((_) async {
+            if (askedToStop) return;
+            err.writeln(
+              'sprout: THE WATCHDOG STOPPED without being asked to. Nothing '
+              'is watching the tree; the board and $log say so.',
+            );
+            await journal.record(watchdogStoppedRecord(at: DateTime.now()));
+          })
+          .catchError((Object error) async {
+            err.writeln('sprout: THE WATCHDOG CRASHED — $error');
+            await journal.record(
+              watchdogStoppedRecord(at: DateTime.now(), error: '$error'),
+            );
+          }),
+    );
+
+    final code = await _serveUntilInterrupted(server);
+
+    // Stopped with the server, and in this order: the loop first, so no sweep
+    // is half-written, then the record saying nobody is looking any more, then
+    // the board, then the file. `stop()` lets the current sweep finish —
+    // interrupting one would leave the journal without its entry, and an
+    // unexplained gap is the one thing this loop is built not to produce.
+    askedToStop = true;
+    await watchdog.stop();
+    await journal.record(watchdogStoppedRecord(at: DateTime.now()));
+    await WatchdogBoard.shared.close();
+    store.close();
+    return code;
+  }
+
+  static String _secs(Duration d) {
+    final seconds = d.inMilliseconds / 1000;
+    return seconds == seconds.roundToDouble()
+        ? '${seconds.round()}s'
+        : '${seconds}s';
   }
 
   /// Holds the process open on [server] and returns when Ctrl-C closes it.
@@ -845,5 +1024,20 @@ String renderFrame(ProtocolFrame frame) => switch (frame) {
   DeltaFrame(:final events) => [
     for (final event in events)
       'delta | #${event.seq} | ${event.nodeId} | ${event.kind}',
+  ].join('\n'),
+  // `watch` never receives one either — the watchdog runs in the daemon and
+  // this verb reads the store directly. It is rendered anyway, and rendered in
+  // full: the sweep's own `why` is the sentence, never a summary of it, and a
+  // consumer pointed at the socket with `--json` gets the same words the board
+  // does. Note there is no "watchdog ok" line for a quiet sweep — the `why`
+  // says what was actually established, which on a blind sweep is nothing.
+  WatchdogFrame(:final why, :final stalled, :final blind, :final failure) => [
+    'watchdog | ${frame.cursor.encode()} | ${stalled.length} stalled, '
+        '${blind.length} unmeasured of ${frame.nodesSwept} | $why',
+    if (failure != null) '  could not look: $failure',
+    for (final node in stalled)
+      '  ${node.silenced ? 'STALL (silenced)' : 'STALL'} | ${node.nodeId} | '
+          '${node.liveness} | ring ${node.consecutiveRings} | ${node.because}',
+    for (final node in blind) '  BLIND | ${node.nodeId} | ${node.because}',
   ].join('\n'),
 };

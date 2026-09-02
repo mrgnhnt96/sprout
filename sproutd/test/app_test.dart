@@ -15,8 +15,10 @@ import 'package:path/path.dart' as p;
 // The socket handler takes four parameters revali injects off the request
 // context by type; this test supplies them by hand.
 import 'package:revali_router/revali_router.dart' hide WebSocket;
+import 'package:sproutd/liveness.dart';
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/store.dart';
+import 'package:sproutd/watchdog.dart';
 import 'package:test/test.dart';
 
 import '../bin/sprout.dart' as cli;
@@ -171,7 +173,7 @@ void main() {
       // Phase 2's snapshot, not Phase 1's: `GET /api/tree` and the socket's
       // opening frame are the same `takeSnapshot`, so the two cannot drift
       // into two different pictures of one tree.
-      final snapshot = TreeController(store).snapshot();
+      final snapshot = TreeController(store, WatchdogBoard()).snapshot();
       expect(snapshot['nodes'], isEmpty);
       expect(Cursor.parse(snapshot['cursor']! as String).position, 0);
       // The fields that must survive any compression are present even here.
@@ -213,7 +215,7 @@ void main() {
           );
         store.append(nodeId: 'a', kind: 'runner.spawned');
 
-        final snapshot = TreeController(store).snapshot();
+        final snapshot = TreeController(store, WatchdogBoard()).snapshot();
         // Three rows, each announcing itself as it was written, then the
         // `runner.spawned` above: the cursor is the head of that feed.
         expect(Cursor.parse(snapshot['cursor']! as String).position, 4);
@@ -248,7 +250,7 @@ void main() {
       // the read loop that lets an inbound pong through (F-06).
       final sent = <String>[];
       final data = DataImpl();
-      final frames = TreeController(store).events(
+      final frames = TreeController(store, WatchdogBoard()).events(
         null,
         data,
         CleanUpImpl(),
@@ -267,6 +269,86 @@ void main() {
       final frame = jsonDecode(sent.first) as Map<String, Object?>;
       expect(frame['type'], snapshotFrameType);
       expect(frame['nodes'], isEmpty);
+    });
+
+    test('a stall reaches the socket, and recovery takes it off', () async {
+      // **The wiring, end to end through the route.** P6-02 shipped the
+      // watchdog with no production caller at all; this is the assertion that
+      // says something now reaches it. The board is the daemon's journal, so
+      // a sweep recorded onto it must come out of the socket as a `watchdog`
+      // frame — and the sweep after it, which names no node, must come out as
+      // a frame that says the tree is not stalled without anything having
+      // written a status row.
+      final board = WatchdogBoard();
+      addTearDown(board.close);
+      // Recorded BEFORE the client attaches: a board that opened during a
+      // stall must not wait out a sweep interval to hear about it.
+      await board.record(
+        SweepRecord(
+          at: DateTime.utc(2026, 9, 2, 21, 45, 48),
+          took: const Duration(milliseconds: 9),
+          nodesSwept: 1,
+          why: 'rang for 1 of 1 node(s): n1 stalled',
+          rang: [
+            Ring(
+              nodeId: 'n1',
+              liveness: Liveness.stalled,
+              because: 'pid 33134 is alive and the transcript last grew 3s ago',
+              consecutiveRings: 1,
+              at: DateTime.utc(2026, 9, 2, 21, 45, 48),
+              pid: 33134,
+            ),
+          ],
+        ),
+      );
+
+      final sent = <String>[];
+      final data = DataImpl();
+      final frames = TreeController(store, board).events(
+        null,
+        data,
+        CleanUpImpl(),
+        AsyncWebSocketSenderImpl<Stream<StringContent>>(
+          (pushed) => pushed.listen((frame) => sent.add(frame.value)),
+        ),
+        CloseWebSocketImpl((code, reason) async {}),
+      );
+      addTearDown(() => data.get<TreeSocketSession>()?.stop());
+      expect(await frames.isEmpty, isTrue);
+
+      Future<List<ProtocolFrame>> settle() async {
+        for (var i = 0; i < 40; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        return [for (final line in sent) ProtocolFrame.decodeLine(line.trim())];
+      }
+
+      final opening = await settle();
+      expect(opening.first, isA<SnapshotFrame>());
+      final stall = opening.whereType<WatchdogFrame>().single;
+      expect(stall.stalled.single.nodeId, 'n1');
+      expect(stall.stalled.single.liveness, 'stalled');
+      expect(stall.conclusive, isTrue);
+      // The frame's cursor is this socket's position, not a new one: a sweep
+      // is not a feed event and must never carry a consumer past one.
+      expect(stall.cursor.encode(), opening.first.cursor.encode());
+
+      // The node writes again; the next sweep names nobody.
+      await board.record(
+        SweepRecord(
+          at: DateTime.utc(2026, 9, 2, 21, 46, 18),
+          took: const Duration(milliseconds: 7),
+          nodesSwept: 1,
+          why:
+              'no ring: the 1 node(s) that could be measured were live or '
+              'ended',
+        ),
+      );
+
+      final after = (await settle()).whereType<WatchdogFrame>().toList();
+      expect(after, hasLength(2));
+      expect(after.last.stalled, isEmpty);
+      expect(after.last.conclusive, isTrue);
     });
   });
 

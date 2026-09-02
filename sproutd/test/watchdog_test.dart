@@ -18,6 +18,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:sproutd/liveness.dart';
+import 'package:sproutd/protocol.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/watchdog.dart';
 import 'package:test/test.dart';
@@ -519,12 +520,18 @@ void main() {
       expect(ringingVerdicts, isNot(contains(Liveness.unmeasured)));
       expect(ringingVerdicts, isNot(contains(Liveness.ended)));
       expect(ringingVerdicts, isNot(contains(Liveness.live)));
-      // And it is NOT `Liveness.pages`, which P6-01 shipped with `unmeasured`
-      // returning true. The disagreement is deliberate and is recorded as F-13
-      // in docs/02-open-findings.md; this pins it so it cannot drift back
-      // silently.
-      expect(Liveness.unmeasured.pages, isTrue);
+      // And it is NOT `Liveness.worthSurfacing`, which is true for
+      // `unmeasured` as well. That was F-13 while the getter was called
+      // `pages`: two declarations answering different questions read as one.
+      // P6-03 settled it by renaming rather than narrowing — `worthSurfacing`
+      // means *belongs on the board*, `ringingVerdicts` means *rings a stall
+      // alarm* — and this pins both halves so neither can drift into the
+      // other.
+      expect(Liveness.unmeasured.worthSurfacing, isTrue);
       expect(ringingVerdicts.contains(Liveness.unmeasured), isFalse);
+      for (final verdict in ringingVerdicts) {
+        expect(verdict.worthSurfacing, isTrue, reason: '$verdict');
+      }
     });
   });
 
@@ -634,6 +641,196 @@ void main() {
     });
   });
 
+  group('7 — the board, which is P6-03 wiring this into `sprout ui`', () {
+    // `WatchdogBoard` is a JOURNAL and not a bell, and this group is why. A
+    // bell fires on a ring, which is an edge; the board needs the level, so a
+    // node that recovered is simply absent from the next frame with nothing
+    // having written a status row anywhere.
+    late Cursor at;
+
+    setUp(() {
+      at = SproutInstance.forFeed(
+        databasePath: store.databasePath,
+        firstEvent: store.firstEvent,
+      ).cursorAt(0);
+    });
+
+    test('a real stall reaches a frame, and recovery removes it', () async {
+      final board = WatchdogBoard();
+      final seen = <SweepRecord>[];
+      final subscription = board.sweeps.listen(seen.add);
+      addTearDown(subscription.cancel);
+
+      final process = await sleeper('board-1');
+      record('board-1', pid: process.pid);
+      File(transcriptPath('board-1')).writeAsStringSync('{"a":1}\n');
+      await Future<void>.delayed(pastFrozen);
+
+      final watchdog = watchdogOver(into: FanOutJournal([journal, board]));
+      final stalledSweep = await watchdog.sweepOnce();
+      expect(stalledSweep.rang, hasLength(1));
+
+      final stalledFrame = watchdogFrameFor(stalledSweep, at: at);
+      expect(stalledFrame.type, WatchdogFrame.wireType);
+      expect(stalledFrame.conclusive, isTrue);
+      expect(stalledFrame.stalled.single.nodeId, 'board-1');
+      expect(stalledFrame.stalled.single.liveness, Liveness.stalled.wire);
+      expect(stalledFrame.stalled.single.because, contains('${process.pid}'));
+      expect(stalledFrame.stalled.single.consecutiveRings, 1);
+      expect(stalledFrame.stalled.single.silenced, isFalse);
+      expect(stalledFrame.why, stalledSweep.why);
+
+      // The node writes again. Nothing calls a setter, nothing appends a
+      // status row: the next sweep simply measures a different thing.
+      File(transcriptPath('board-1'))
+          .writeAsStringSync('{"a":2}\n', mode: FileMode.append);
+      final recovered = await watchdog.sweepOnce();
+      final recoveredFrame = watchdogFrameFor(recovered, at: at);
+      expect(recoveredFrame.stalled, isEmpty);
+      expect(recoveredFrame.conclusive, isTrue);
+
+      // And the node's stored status never moved, which is the point.
+      expect(store.node('board-1')!.status, NodeStatus.working);
+
+      // Both sweeps reached the board, in order, through the journal.
+      expect(seen, hasLength(2));
+      expect(board.last!.why, recovered.why);
+    });
+
+    test(
+      'a silenced node is STILL on the board, and says it is capped',
+      () async {
+        final process = await sleeper('capped-1');
+        record('capped-1', pid: process.pid);
+        File(transcriptPath('capped-1')).writeAsStringSync('{"a":1}\n');
+        await Future<void>.delayed(pastFrozen);
+
+        final watchdog = watchdogOver(ringCap: 1);
+        await watchdog.sweepOnce();
+        final capped = await watchdog.sweepOnce();
+        expect(capped.rang, isEmpty, reason: 'the cap silenced the ring');
+        expect(capped.silenced, hasLength(1));
+
+        // The RING stopped; the STALL did not. A board that dropped the node
+        // here would go quiet about it precisely because the watchdog had
+        // already rung — a mute wearing a cap's clothing.
+        final frame = watchdogFrameFor(capped, at: at);
+        expect(frame.stalled, hasLength(1));
+        expect(frame.stalled.single.nodeId, 'capped-1');
+        expect(frame.stalled.single.silenced, isTrue);
+        expect(frame.stalled.single.liveness, Liveness.stalled.wire);
+        expect(frame.stalled.single.because, contains('${process.pid}'));
+      },
+    );
+
+    test('a blind sweep is not a healthy one, on the frame either', () async {
+      record('blind-1', pid: 424242);
+      final watchdog = watchdogOver(
+        processes: const PsProcessProbe(executable: '/nonexistent/ps'),
+      );
+      final sweep = await watchdog.sweepOnce();
+
+      final frame = watchdogFrameFor(sweep, at: at);
+      expect(frame.stalled, isEmpty);
+      expect(frame.blind, hasLength(1));
+      expect(frame.blind.single.nodeId, 'blind-1');
+      expect(frame.why, contains('establishes nothing'));
+      // The frame carries the sweep's own sentence and offers no boolean a
+      // consumer could read as health — `conclusive` is about EVIDENCE, and a
+      // sweep that measured nothing still took place.
+      expect(frame.why, sweep.why);
+      expect(frame.toJson().containsKey('healthy'), isFalse);
+    });
+
+    test('a sweep that could not be taken says so and is not conclusive', () {
+      final sweep = SweepRecord(
+        at: DateTime.utc(2026, 9, 2, 21, 45),
+        took: Duration.zero,
+        nodesSwept: 0,
+        failure: 'ps: command not found',
+        why: 'no sweep was taken: the measurement threw',
+      );
+      final frame = watchdogFrameFor(sweep, at: at);
+      expect(frame.conclusive, isFalse);
+      expect(frame.failure, 'ps: command not found');
+    });
+
+    test('the last entry a stopped watchdog writes says nobody is looking', () {
+      final crashed = watchdogStoppedRecord(
+        at: DateTime.utc(2026),
+        error: 'Bad state: boom',
+      );
+      expect(crashed.failure, 'Bad state: boom');
+      expect(crashed.why, contains('THE WATCHDOG STOPPED'));
+      expect(watchdogFrameFor(crashed, at: at).conclusive, isFalse);
+
+      final orderly = watchdogStoppedRecord(at: DateTime.utc(2026));
+      expect(orderly.why, contains('shutting down'));
+      expect(orderly.why, contains('nobody is looking'));
+      expect(watchdogFrameFor(orderly, at: at).conclusive, isFalse);
+    });
+
+    test('a frame round-trips through the wire decoder', () {
+      final sweep = SweepRecord(
+        at: DateTime.utc(2026, 9, 2, 21, 45, 48),
+        took: const Duration(milliseconds: 12),
+        nodesSwept: 2,
+        why: 'rang for 1 of 2 node(s)',
+        rang: [
+          Ring(
+            nodeId: 'n1',
+            liveness: Liveness.stalled,
+            because: 'pid 33134 is alive and the transcript last grew 3s ago',
+            consecutiveRings: 1,
+            at: DateTime.utc(2026, 9, 2, 21, 45, 48),
+            pid: 33134,
+            frozenFor: const Duration(seconds: 3),
+          ),
+        ],
+      );
+      final line = watchdogFrameFor(sweep, at: at).encodeLine();
+      // Decoded by the same `ProtocolFrame.decodeLine` every other frame goes
+      // through — the browser's decoder, compiled from the same declarations.
+      final back = ProtocolFrame.decodeLine(line);
+      expect(back, isA<WatchdogFrame>());
+      final frame = back as WatchdogFrame;
+      expect(frame.stalled.single.nodeId, 'n1');
+      expect(frame.stalled.single.liveness, 'stalled');
+      expect(frame.sweptAt, DateTime.utc(2026, 9, 2, 21, 45, 48));
+      expect(frame.encodeLine(), line);
+    });
+
+    test('what the board surfaces is exactly `worthSurfacing`', () async {
+      // F-13, settled: `worthSurfacing` is the broader predicate — it includes
+      // `unmeasured`, which `ringingVerdicts` deliberately does not. The frame
+      // honours both at once by carrying two lists, and this is the assertion
+      // that makes the getter a claim about this daemon rather than a doc
+      // comment. `stalled` holds the ringing verdicts; `blind` holds the
+      // unmeasured; and together they are every verdict `worthSurfacing`
+      // returns true for.
+      final surfaced = {
+        for (final verdict in Liveness.values)
+          if (verdict.worthSurfacing) verdict,
+      };
+      expect(surfaced, {
+        ...ringingVerdicts,
+        Liveness.unmeasured,
+      }, reason: 'the frame has a list for each half and nothing else');
+
+      final process = await sleeper('both-1');
+      record('both-1', pid: process.pid);
+      record('both-2', pid: 424243);
+      File(transcriptPath('both-1')).writeAsStringSync('{"a":1}\n');
+      await Future<void>.delayed(pastFrozen);
+
+      final watchdog = watchdogOver(processes: _OnlyKnows({process.pid}));
+      final sweep = await watchdog.sweepOnce();
+      final frame = watchdogFrameFor(sweep, at: at);
+      expect(frame.stalled.map((n) => n.nodeId), ['both-1']);
+      expect(frame.blind.map((n) => n.nodeId), ['both-2']);
+    });
+  });
+
   group('never acts', () {
     test('nothing under lib/src/watchdog can act on a process', () {
       // §5: "Never auto-reclaim a stalled node" — the real incident behind
@@ -681,6 +878,83 @@ void main() {
       expect(offenders, isEmpty);
     });
 
+    test('nothing in routes/ can act on a process either', () {
+      // P6-03 put the watchdog's verdict on a socket, so `routes/` is now a
+      // third place the temptation lands — a "clean up the stalled node"
+      // endpoint is one `@Post` away and would be the most natural-looking
+      // code in the repo. P6-01 guards `lib/src/liveness/`, P6-02 guards
+      // `lib/src/watchdog/`, and this guards the surface that carries their
+      // output to a human.
+      final offenders = Directory('routes')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart'))
+          .where(
+            (f) => RegExp(
+              r'\.kill\(|ProcessSignal|Process\.killPid|Process\.(run|start)'
+              r'|\.terminate\(',
+            ).hasMatch(f.readAsStringSync()),
+          )
+          .map((f) => f.path)
+          .toList();
+      expect(
+        offenders,
+        isEmpty,
+        reason:
+            'the daemon surfaces and pages. Acting on a stalled node belongs '
+            'to a human, and to no route.',
+      );
+    });
+
+    test('and the frame carries nothing to act ON', () {
+      // The structural half, which is stronger than any grep: a board cannot
+      // signal a process it was never given. `StalledNode` carries an id, a
+      // verdict, a sentence and a ring count — deliberately no pid, no command
+      // line and no handle — so the endpoint above could not be written
+      // against this frame even if someone wanted to. `Ring` does carry a pid,
+      // because a page a human cannot check by hand in one `ps` is a page they
+      // learn to dismiss; that goes to stderr and to the journal, not to a
+      // browser.
+      //
+      // The pid does appear on the wire — inside `because`, because that
+      // sentence is carried through unedited and a stall a human cannot check
+      // by hand is a stall they dismiss. What is asserted here is that it is
+      // not a FIELD: there is nothing a consumer can read as `node.pid` and
+      // hand to a kill, and prising it back out of prose is a thing somebody
+      // would have to choose to write.
+      final frame = watchdogFrameFor(
+        SweepRecord(
+          at: DateTime.utc(2026),
+          took: Duration.zero,
+          nodesSwept: 1,
+          why: 'rang for 1 of 1 node(s)',
+          rang: [
+            Ring(
+              nodeId: 'n1',
+              liveness: Liveness.stalled,
+              because: 'pid 33134 is alive',
+              consecutiveRings: 1,
+              at: DateTime.utc(2026),
+              pid: 33134,
+            ),
+          ],
+        ),
+        at: SproutInstance.forFeed(
+          databasePath: store.databasePath,
+          firstEvent: store.firstEvent,
+        ).cursorAt(0),
+      );
+      final encoded = frame.stalled.single.toJson();
+      expect(encoded.keys, isNot(contains('pid')));
+      expect(encoded.keys, {
+        'node_id',
+        'liveness',
+        'because',
+        'consecutive_rings',
+        'silenced',
+      });
+    });
+
     test('a bell cannot answer back', () {
       // `ring` returns Future<void>. A bell that could return "handled" is the
       // first half of the auto-reclaim that must never exist, so the absence
@@ -724,4 +998,21 @@ void main() {
       expect(defaultRingCap, theirs['ring_cap']);
     });
   });
+}
+
+/// A probe that answers for the pids it knows and fails on the rest.
+///
+/// The two halves in one sweep: a node that is genuinely contradicted, and a
+/// node the watchdog could not look at. Blindness that is total is easy to get
+/// wrong in the safe direction — nothing rings — so the mixed case is the one
+/// that proves the two lists stay separate.
+final class _OnlyKnows implements ProcessProbe {
+  const _OnlyKnows(this.known);
+
+  final Set<int> known;
+
+  @override
+  Future<ProcessLook> inspect(int pid) async => known.contains(pid)
+      ? const PsProcessProbe().inspect(pid)
+      : ProcessUnreadable(pid, 'this probe was told not to look at $pid');
 }

@@ -65,6 +65,9 @@ export 'src/protocol/frame.dart'
         ProtocolFrame,
         ReadyFrame,
         SnapshotFrame,
+        StalledNode,
+        UnmeasuredNode,
+        WatchdogFrame,
         eventFromJson,
         eventToJson;
 export 'src/protocol/instance.dart' show SproutInstance;

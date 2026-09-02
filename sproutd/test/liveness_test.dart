@@ -221,13 +221,18 @@ void main() {
       expect(stale.because, contains('${process.pid}'));
     });
 
-    test('a stalled verdict pages and is still a verdict', () {
-      expect(Liveness.stalled.pages, isTrue);
+    test('a stalled verdict is worth surfacing and is still a verdict', () {
+      // `worthSurfacing` was `pages` until P6-03 settled F-13. The SET is
+      // unchanged — `unmeasured` is still in it, which was P6-01's whole point
+      // — and only the name moved, so that it stops reading as the watchdog's
+      // ring predicate. That one is `ringingVerdicts`, and
+      // `test/watchdog_test.dart` pins the two side by side.
+      expect(Liveness.stalled.worthSurfacing, isTrue);
       expect(Liveness.stalled.isVerdict, isTrue);
-      expect(Liveness.live.pages, isFalse);
-      expect(Liveness.unmeasured.pages, isTrue);
+      expect(Liveness.live.worthSurfacing, isFalse);
+      expect(Liveness.unmeasured.worthSurfacing, isTrue);
       expect(Liveness.unmeasured.isVerdict, isFalse);
-      expect(Liveness.ended.pages, isFalse);
+      expect(Liveness.ended.worthSurfacing, isFalse);
       expect(Liveness.ended.isVerdict, isFalse);
     });
 

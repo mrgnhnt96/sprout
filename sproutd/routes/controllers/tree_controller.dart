@@ -30,6 +30,7 @@ import 'package:sproutd/protocol.dart';
 import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/watch.dart';
+import 'package:sproutd/watchdog.dart';
 
 import '../main_app.dart';
 
@@ -142,11 +143,20 @@ final class PingDuration extends Duration {
 /// answer at `/` — which P3-03's UI has to. See [daemonPrefix].
 @Controller(treeControllerPath)
 class TreeController {
-  /// Takes the store from DI. Constructed once at startup, not per request
+  /// Takes the store and the watchdog board from DI. Constructed once at
+  /// startup, not per request
   /// (`.revali/server/definitions/__routes.dart` holds one instance).
-  const TreeController(this._store);
+  ///
+  /// Both arrive the same way: revali's generator emits one
+  /// `RequestScopedDI.getFrom(di)` per constructor parameter and infers each
+  /// type from the parameter (`revali` 3.3.2, `create_class.dart` and
+  /// `get_params.dart`), so adding the board is a `revali build` away and not
+  /// a new mechanism.
+  const TreeController(this._store, this._watchdog);
 
   final SproutStore _store;
+
+  final WatchdogBoard _watchdog;
 
   /// `GET /api/tree` — the whole world at one cursor.
   ///
@@ -205,6 +215,7 @@ class TreeController {
   ) => attachTreeSocket(
     store: _store,
     instance: daemonInstanceFor(_store),
+    watchdog: _watchdog,
     since: since,
     data: data,
     cleanUp: cleanUp,
@@ -280,12 +291,24 @@ Map<String, Object?> snapshotFrameJson(SproutSnapshot snapshot) =>
 Stream<Map<String, Object?>> treeSocketFrames({
   required SproutStore store,
   required SproutInstance instance,
+  WatchdogBoard? watchdog,
   String? since,
   WatchSignals? signals,
   DateTime Function()? now,
 }) {
   late final StreamController<Map<String, Object?>> out;
   StreamSubscription<ProtocolFrame>? watching;
+  StreamSubscription<SweepRecord>? sweeping;
+
+  // Where this socket stands, updated as frames go out.
+  //
+  // A `watchdog` frame is **not** a feed position — the watchdog appends
+  // nothing to the event feed, by design — so it carries the last cursor this
+  // socket actually emitted rather than one of its own. A consumer that stores
+  // the cursor off every frame therefore cannot be carried past an event by a
+  // frame that contained none, which is the only way a non-feed frame could
+  // corrupt a position.
+  Cursor? at;
 
   void start() {
     // The gate is asked here only to decide whether a picture is owed, never
@@ -295,15 +318,13 @@ Stream<Map<String, Object?>> treeSocketFrames({
     final refused = since != null && instance.accept(since) is CursorRefused;
     if (!refused) {
       try {
-        out.add(
-          snapshotFrameJson(
-            takeSnapshot(
-              StoreSnapshotSource(store),
-              instance: instance,
-              now: now,
-            ),
-          ),
+        final snapshot = takeSnapshot(
+          StoreSnapshotSource(store),
+          instance: instance,
+          now: now,
         );
+        at = snapshot.cursor;
+        out.add(snapshotFrameJson(snapshot));
       } on Object catch (error) {
         // A snapshot that cannot be taken is not a degraded snapshot, so the
         // consumer is told the stream broke and where this daemon stood —
@@ -330,6 +351,28 @@ Stream<Map<String, Object?>> treeSocketFrames({
       }
     }
 
+    // The watchdog's verdict, opened with and then followed.
+    //
+    // **The last sweep goes out immediately**, before any replay, because a
+    // board that attached during a stall must not have to wait out a whole
+    // sweep interval to learn about it — thirty seconds of a screen that says
+    // nothing is wrong while something is. Null means the watchdog has not
+    // swept yet, and nothing is sent: "no sweep yet" is the board's own
+    // rendering of a missing frame, and inventing a quiet one here would be
+    // this daemon claiming a measurement it has not taken.
+    if (watchdog != null) {
+      final last = watchdog.last;
+      final position = at;
+      if (last != null && position != null) {
+        out.add(watchdogFrameFor(last, at: position).toJson());
+      }
+      sweeping = watchdog.sweeps.listen((sweep) {
+        final position = at;
+        if (position == null || out.isClosed) return;
+        out.add(watchdogFrameFor(sweep, at: position).toJson());
+      });
+    }
+
     var closeReason = '${socketClosedReasonPrefix}done';
     watching =
         watchFrames(
@@ -343,9 +386,17 @@ Stream<Map<String, Object?>> treeSocketFrames({
             if (frame case ByeFrame(:final reason)) {
               closeReason = '$socketClosedReasonPrefix${reason.wire}';
             }
+            at = frame.cursor;
             out.add(frame.toJson());
           },
           onDone: () {
+            // Dropped here as well as in `onCancel`: closing a controller does
+            // not run its `onCancel`, so a socket that ended with a `bye`
+            // would otherwise keep this subscription — and with it a
+            // reference to a closed controller — for the life of the daemon.
+            final sweeps = sweeping;
+            sweeping = null;
+            unawaited(sweeps?.cancel());
             out.addError(CloseWebSocketException(1000, closeReason));
             unawaited(out.close());
           },
@@ -360,7 +411,10 @@ Stream<Map<String, Object?>> treeSocketFrames({
       // here is what drops its heartbeat and poll timers.
       final subscription = watching;
       watching = null;
+      final sweeps = sweeping;
+      sweeping = null;
       await subscription?.cancel();
+      await sweeps?.cancel();
     },
   );
   return out.stream;
@@ -398,6 +452,7 @@ Stream<StringContent> attachTreeSocket({
   required CleanUp cleanUp,
   required AsyncWebSocketSender<Stream<StringContent>> sender,
   required CloseWebSocket close,
+  WatchdogBoard? watchdog,
   String? since,
   WatchSignals? signals,
   DateTime Function()? now,
@@ -415,6 +470,7 @@ Stream<StringContent> attachTreeSocket({
     treeSocketFrames(
       store: store,
       instance: instance,
+      watchdog: watchdog,
       since: since,
       signals: signals,
       now: now,

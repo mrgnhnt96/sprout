@@ -23,6 +23,13 @@ import 'package:sprout_protocol/values.dart';
 /// runaway this project exists to surface.
 const String strangerText = 'not described on this stream';
 
+/// What the board says before the daemon's watchdog has swept even once.
+///
+/// **Not silence, and not "ok".** A daemon whose watchdog has not run yet and
+/// a daemon whose tree is genuinely fine leave the board with exactly the same
+/// information — none — and INV8 is that those two must never render the same.
+const String noSweepYetText = 'no sweep yet';
+
 /// The whole world as this client knows it.
 ///
 /// **Snapshotted once, then advanced only by deltas.** Re-taking a snapshot to
@@ -49,6 +56,9 @@ final class LiveTree {
     this.lastFrame,
     this.frames = 0,
     this.events = 0,
+    this.lastSweep,
+    this.stalled = const [],
+    this.unmeasured = const [],
   });
 
   /// Nothing has arrived yet.
@@ -142,11 +152,57 @@ final class LiveTree {
   /// How many events have been applied.
   final int events;
 
+  /// The most recent [WatchdogFrame], or null if the daemon has sent none.
+  ///
+  /// Kept whole, including the ones that establish nothing, because its [why]
+  /// is the sweep's own sentence and the board prints that rather than a
+  /// summary of it. Null renders as [noSweepYetText] and never as health.
+  final WatchdogFrame? lastSweep;
+
+  /// Every node the watchdog currently considers stalled or abandoned.
+  ///
+  /// **Replaced wholesale by a conclusive sweep, and RETAINED across one that
+  /// is not.** That is the whole of how a node stops being stalled here: the
+  /// next sweep simply does not mention it, and no status row anywhere was
+  /// written or cleared. And it is why an inconclusive sweep must not clear
+  /// this list — a sweep that could not look has not observed a node getting
+  /// better, and treating blindness as recovery is the failure this phase
+  /// exists to prevent. See [WatchdogFrame.conclusive].
+  final List<StalledNode> stalled;
+
+  /// Every node the watchdog could not measure on its last conclusive sweep.
+  ///
+  /// Carried beside [stalled] and never merged into it: one is what the
+  /// watchdog saw, the other is what it failed to see, and a board that showed
+  /// them as one thing would either page about a missing `ps` or hide a tree
+  /// it cannot see.
+  final List<UnmeasuredNode> unmeasured;
+
   /// Whether a snapshot has arrived at all.
   bool get isAttached => cursor != null;
 
   /// Whether the feed could not be read.
   bool get isJournalUnreadable => journalUnreadable != null;
+
+  /// What the watchdog says about [nodeId], or null if it says nothing.
+  ///
+  /// Null is *not* "this node is fine": it means the last conclusive sweep did
+  /// not contradict this node, which for a node the watchdog could not measure
+  /// is a different thing entirely. [unmeasuredOf] answers that half.
+  StalledNode? stallOf(String nodeId) {
+    for (final node in stalled) {
+      if (node.nodeId == nodeId) return node;
+    }
+    return null;
+  }
+
+  /// Why the watchdog could not measure [nodeId], or null if it could.
+  UnmeasuredNode? unmeasuredOf(String nodeId) {
+    for (final node in unmeasured) {
+      if (node.nodeId == nodeId) return node;
+    }
+    return null;
+  }
 
   /// This tree with [frame] applied.
   ///
@@ -174,9 +230,30 @@ final class LiveTree {
           lastFrame: frame,
           frames: frames + 1,
           events: events,
+          // A snapshot replaces the tree and says nothing about the watchdog,
+          // which runs beside the feed rather than in it. Dropping the verdict
+          // here would make a re-snapshot look like a recovery.
+          lastSweep: lastSweep,
+          stalled: stalled,
+          unmeasured: unmeasured,
         );
       case ReadyFrame():
         return _with(frame: frame, replayComplete: true);
+      case WatchdogFrame():
+        // A sweep is not a feed position and carries no events, so nothing
+        // about the tree, the cursor's meaning or `asOf` moves here — the
+        // frame's cursor is the last one this socket already emitted. What
+        // changes is only what the watchdog believes.
+        //
+        // **An inconclusive sweep leaves [stalled] alone.** `_with` copies the
+        // current lists, so a sweep that could not look reports its `why` on
+        // the board without erasing what the last real one saw.
+        return _with(
+          frame: frame,
+          sweep: frame,
+          stalled: frame.conclusive ? frame.stalled : stalled,
+          unmeasured: frame.conclusive ? frame.blind : unmeasured,
+        );
       case HeartbeatFrame(:final sentAt):
         return _with(frame: frame, heartbeat: sentAt, instant: sentAt);
       case ByeFrame():
@@ -203,6 +280,9 @@ final class LiveTree {
           lastFrame: frame,
           frames: frames + 1,
           events: this.events + events.length,
+          lastSweep: lastSweep,
+          stalled: stalled,
+          unmeasured: unmeasured,
         );
     }
   }
@@ -213,6 +293,9 @@ final class LiveTree {
     DateTime? heartbeat,
     DateTime? instant,
     ByeFrame? bye,
+    WatchdogFrame? sweep,
+    List<StalledNode>? stalled,
+    List<UnmeasuredNode>? unmeasured,
   }) {
     final at = asOf;
     return LiveTree(
@@ -231,6 +314,9 @@ final class LiveTree {
       lastFrame: frame,
       frames: frames + 1,
       events: events,
+      lastSweep: sweep ?? lastSweep,
+      stalled: stalled ?? this.stalled,
+      unmeasured: unmeasured ?? this.unmeasured,
     );
   }
 

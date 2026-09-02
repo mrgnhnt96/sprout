@@ -61,6 +61,10 @@ class App extends StatelessComponent {
     ReadyFrame() => 'replay complete',
     HeartbeatFrame(:final sentAt) => 'alive ${formatClock(sentAt)}',
     DeltaFrame(:final events) => '${events.length} events',
+    // The sweep's own count, never a verdict on it: "2 stalled" and "0
+    // stalled" are both facts, and neither is "the tree is fine".
+    WatchdogFrame(:final stalled, :final blind) =>
+      'watchdog · ${stalled.length} stalled, ${blind.length} unmeasured',
     ByeFrame(:final reason, :final detail) =>
       'ended: ${reason.wire}${detail == null ? '' : ' — $detail'}',
   };
@@ -87,6 +91,43 @@ class App extends StatelessComponent {
         '${beat == null ? unknownValueText : formatClock(beat)}';
   }
 
+  /// The one line that says what the daemon's watchdog last established.
+  ///
+  /// **There is deliberately no green "watchdog OK".** What this prints is
+  /// [WatchdogFrame.why] — the daemon's own sentence, the same one appended to
+  /// the NDJSON journal — because that sentence already says what a sweep
+  /// actually established and refuses to overstate it. A blind sweep reads
+  /// *"not one of the 2 node(s) could be measured, so this sweep establishes
+  /// nothing about any of them"*, and no reading of that is health. An
+  /// indicator that went green there would rebuild the exact failure §1 was
+  /// written about: *"a run sat inert for six hours with the Stop gate,
+  /// watchdog, and limit gate all reporting healthy."*
+  ///
+  /// Three states and none of them is silence: no sweep yet, a sweep that
+  /// could not look, and a sweep that could. The last two are told apart by
+  /// the leading word as well as by the sentence, because a person scanning a
+  /// board reads the first token.
+  static String watchdog(LiveTree tree) {
+    final sweep = tree.lastSweep;
+    if (sweep == null) return 'WATCHDOG · $noSweepYetText';
+    final at = formatClock(sweep.sweptAt);
+    if (sweep.failure case final failure?) {
+      return 'WATCHDOG COULD NOT LOOK · $at · $failure · ${sweep.why}';
+    }
+    return 'WATCHDOG · $at · ${sweep.why}';
+  }
+
+  /// The line the board shows under a node the watchdog is contradicting.
+  static String stallLine(StalledNode node) =>
+      'STALLED · ${node.nodeId} · ${node.liveness} · ${node.because} '
+      '(ring ${node.consecutiveRings}${node.silenced ? ', at the ring cap and '
+                'silenced — still stalled' : ''})';
+
+  /// The line the board shows for a node the watchdog could not measure.
+  static String blindLine(UnmeasuredNode node) =>
+      'UNMEASURED · ${node.nodeId} · ${node.because} · not a stall and NOT '
+      'health: the watchdog could not look';
+
   /// Every line of the board, in order, as text.
   ///
   /// Separated from [build] so the whole rendering is testable on the VM —
@@ -97,18 +138,39 @@ class App extends StatelessComponent {
     return [
       'cursor ${tree.cursor?.encode() ?? unknownValueText}',
       liveness(tree),
+      watchdog(tree),
       if (tree.isAttached && tree.nodes.isEmpty && tree.strangers.isEmpty)
         noNodesText,
       // `asOf` is null only before any frame, and `nodes` is empty then, so
       // this never renders an age against a made-up instant.
       for (final node in tree.nodes)
-        if (at != null) node.render(at),
+        if (at != null) ...[
+          node.render(at),
+          if (tree.stallOf(node.node.id) case final stall?) stallLine(stall),
+          if (tree.unmeasuredOf(node.node.id) case final blind?)
+            blindLine(blind),
+        ],
       for (final MapEntry(key: id, value: count) in tree.strangers.entries)
         '$unknownValueText · $id · $strangerText · $count events',
+      // A node the watchdog is contradicting that this client has never been
+      // shown. Printed rather than dropped, for the reason a stranger is: an
+      // id the daemon is ringing about is a real node, and a board that hid it
+      // would report a healthier tree than the daemon can see.
+      for (final stall in tree.stalled)
+        if (!_isKnown(tree, stall.nodeId)) stallLine(stall),
+      for (final blind in tree.unmeasured)
+        if (!_isKnown(tree, blind.nodeId)) blindLine(blind),
       if (tree.resources.isEmpty) nothingHeldText,
       for (final resource in tree.resources) resource.label,
       if (tree.journalUnreadable case final why?) '$journalUnreadableKey: $why',
     ];
+  }
+
+  static bool _isKnown(LiveTree tree, String nodeId) {
+    for (final node in tree.nodes) {
+      if (node.node.id == nodeId) return true;
+    }
+    return false;
   }
 
   @override
@@ -121,24 +183,51 @@ class App extends StatelessComponent {
         Component.text('cursor ${tree.cursor?.encode() ?? unknownValueText}'),
       ]),
       div(classes: 'sprout-live', [Component.text(liveness(tree))]),
+      div(
+        classes: tree.lastSweep?.conclusive ?? true
+            ? 'sprout-watchdog'
+            : 'sprout-watchdog sprout-watchdog-blind',
+        [Component.text(watchdog(tree))],
+      ),
       if (error case final message?)
         div(classes: 'sprout-error', [Component.text(message)]),
       div(classes: 'sprout-board', [
         if (tree.isAttached && tree.nodes.isEmpty && tree.strangers.isEmpty)
           div(classes: 'sprout-empty', [Component.text(noNodesText)]),
         for (final node in tree.nodes)
-          if (tree.asOf case final at?)
+          if (tree.asOf case final at?) ...[
             div(
               classes: 'sprout-node',
-              attributes: {'data-status': node.node.status.wire},
+              attributes: {
+                'data-status': node.node.status.wire,
+                // **Beside the node, not inside it.** `NodeStatus` has no
+                // `stalled` member on purpose: liveness is a verdict recomputed
+                // every sweep, so a recovered node loses this attribute on the
+                // next frame with nothing having written a status row.
+                if (tree.stallOf(node.node.id) case final stall?)
+                  'data-watchdog': stall.liveness,
+                if (tree.unmeasuredOf(node.node.id) != null)
+                  'data-watchdog': 'unmeasured',
+              },
               [Component.text(node.render(at))],
             ),
+            if (tree.stallOf(node.node.id) case final stall?)
+              div(classes: 'sprout-stall', [Component.text(stallLine(stall))]),
+            if (tree.unmeasuredOf(node.node.id) case final blind?)
+              div(classes: 'sprout-blind', [Component.text(blindLine(blind))]),
+          ],
         for (final MapEntry(key: id, value: count) in tree.strangers.entries)
           div(classes: 'sprout-node sprout-stranger', [
             Component.text(
               '$unknownValueText · $id · $strangerText · $count events',
             ),
           ]),
+        for (final stall in tree.stalled)
+          if (!_isKnown(tree, stall.nodeId))
+            div(classes: 'sprout-stall', [Component.text(stallLine(stall))]),
+        for (final blind in tree.unmeasured)
+          if (!_isKnown(tree, blind.nodeId))
+            div(classes: 'sprout-blind', [Component.text(blindLine(blind))]),
       ]),
       div(classes: 'sprout-held', [
         if (tree.resources.isEmpty)
@@ -178,6 +267,24 @@ class App extends StatelessComponent {
       css('.sprout-head').styles(opacity: 0.6),
       css('.sprout-live').styles(fontWeight: FontWeight.bold),
       css('.sprout-error').styles(color: const Color('#b00020')),
+      // The stall reads as loud as the error it is, and the node line above it
+      // is marked so the two are one block at a glance. There is no rule for
+      // a HEALTHY node, deliberately: nothing on this board is ever coloured
+      // to mean "fine".
+      css('.sprout-stall').styles(
+        color: const Color('#b00020'),
+        fontWeight: FontWeight.bold,
+        raw: {'white-space': 'pre-wrap'},
+      ),
+      css(
+        '.sprout-blind',
+      ).styles(color: const Color('#8a6d00'), raw: {'white-space': 'pre-wrap'}),
+      css('.sprout-node[data-watchdog]').styles(color: const Color('#b00020')),
+      css('.sprout-node[data-watchdog="unmeasured"]')
+          .styles(color: const Color('#8a6d00')),
+      css('.sprout-watchdog').styles(raw: {'white-space': 'pre-wrap'}),
+      css('.sprout-watchdog-blind')
+          .styles(color: const Color('#8a6d00'), fontWeight: FontWeight.bold),
       css('.sprout-stranger').styles(opacity: 0.7),
       css('.sprout-held')
           .styles(opacity: 0.6, margin: Margin.only(top: .5.rem)),

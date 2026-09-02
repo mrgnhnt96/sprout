@@ -11,6 +11,7 @@ import 'package:revali_core/types/string_content.dart';
 import 'package:revali_core/web_socket/async_web_socket_sender.dart';
 import 'package:revali_core/web_socket/close_web_socket.dart';
 import 'package:sproutd/src/store/sprout_store.dart';
+import 'package:sproutd/src/watchdog/board.dart';
 
 import '../../routes/controllers/tree_controller.dart';
 import '../../routes/controllers/ui_controller.dart';

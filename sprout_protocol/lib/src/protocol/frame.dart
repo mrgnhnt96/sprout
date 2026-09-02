@@ -4,6 +4,12 @@ import '../values/event.dart';
 import '../snapshot/snapshot.dart';
 import 'cursor.dart';
 
+// P6-03's frame, in its own file. A `part` and not an import, because
+// [ProtocolFrame] is sealed: a subtype has to be in the same *library*, and
+// the alternative is a 250-line frame appended to this one. Nothing else in
+// this package uses parts; this is the one place the language requires it.
+part 'watchdog.dart';
+
 /// Thrown when a line on the wire is not a frame this build understands.
 ///
 /// The stream parser in `lib/stream.dart` deliberately **never** throws, and
@@ -100,6 +106,7 @@ sealed class ProtocolFrame {
       HeartbeatFrame.wireType => HeartbeatFrame.fromJson(json),
       ByeFrame.wireType => ByeFrame.fromJson(json),
       DeltaFrame.wireType => DeltaFrame.fromJson(json),
+      WatchdogFrame.wireType => WatchdogFrame.fromJson(json),
       _ => throw ProtocolFormatException('unknown frame type', type),
     };
   }
@@ -226,7 +233,7 @@ final class ReadyFrame extends ProtocolFrame {
 
   /// Decodes a `ready` object.
   factory ReadyFrame.fromJson(Map<String, Object?> json) =>
-      ReadyFrame(cursor: _cursorOf(json));
+      ReadyFrame(cursor: cursorOf(json));
 
   @override
   String get type => wireType;
@@ -263,7 +270,7 @@ final class HeartbeatFrame extends ProtocolFrame {
 
   /// Decodes a `heartbeat` object.
   factory HeartbeatFrame.fromJson(Map<String, Object?> json) =>
-      HeartbeatFrame(cursor: _cursorOf(json), sentAt: _instantOf(json, 'at'));
+      HeartbeatFrame(cursor: cursorOf(json), sentAt: instantOf(json, 'at'));
 
   /// When the daemon emitted this frame. UTC.
   final DateTime sentAt;
@@ -307,7 +314,7 @@ final class ByeFrame extends ProtocolFrame {
       throw ProtocolFormatException('bye "detail" is not a string');
     }
     return ByeFrame(
-      cursor: _cursorOf(json),
+      cursor: cursorOf(json),
       reason: ByeReason.fromWire(reason),
       detail: detail as String?,
     );
@@ -389,7 +396,7 @@ final class DeltaFrame extends ProtocolFrame {
       throw ProtocolFormatException('delta has no "events"', jsonEncode(json));
     }
     return DeltaFrame(
-      cursor: _cursorOf(json),
+      cursor: cursorOf(json),
       events: [for (final event in events) eventFromJson(_objectOf(event))],
     );
   }
@@ -456,7 +463,11 @@ SproutEvent eventFromJson(Map<String, Object?> json) {
   );
 }
 
-Cursor _cursorOf(Map<String, Object?> json) {
+/// Reads the `cursor` every frame carries.
+///
+/// Shared with the `watchdog.dart` part rather than copied into it: two
+/// derivations of one wire field that must agree is the shape of finding F-01.
+Cursor cursorOf(Map<String, Object?> json) {
   final value = json['cursor'];
   if (value is! String) {
     throw ProtocolFormatException('frame has no "cursor"', jsonEncode(json));
@@ -475,7 +486,9 @@ Map<String, Object?> _objectOf(Object? value) {
   return {for (final entry in value.entries) '${entry.key}': entry.value};
 }
 
-DateTime _instantOf(Map<String, Object?> json, String key) {
+/// Reads an ISO-8601 instant out of [key], in UTC. Shared with `watchdog.dart`
+/// for the reason [cursorOf] is.
+DateTime instantOf(Map<String, Object?> json, String key) {
   final value = json[key];
   if (value is! String) {
     throw ProtocolFormatException('frame has no "$key"', jsonEncode(json));

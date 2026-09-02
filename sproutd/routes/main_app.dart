@@ -16,6 +16,7 @@ import 'dart:io';
 
 import 'package:revali_router/revali_router.dart';
 import 'package:sproutd/store.dart';
+import 'package:sproutd/watchdog.dart';
 
 /// The loopback address, as a literal.
 ///
@@ -136,5 +137,17 @@ final class MainApp extends AppConfig {
     di.registerLazySingleton<SproutStore>(
       () => SproutStore.open(path: databasePathFrom(Platform.environment)),
     );
+    // The board the daemon's watchdog writes its sweeps to, so a socket can
+    // hand them to an attached client. **Registered, not constructed**: the
+    // watchdog itself is started by `bin/sprout.dart`'s `UiCommand`, which owns
+    // the daemon's lifetime, and `WatchdogBoard.shared` is how the two halves
+    // in one process find each other — `createServer` builds this app itself,
+    // so there is no seam to pass an instance through. See `WatchdogBoard`.
+    //
+    // An app started some other way (`revali dev`) resolves a board that
+    // nothing is writing to, and the client renders that as "no sweep yet"
+    // rather than as health — which is correct, because in that process
+    // nothing is watching.
+    di.registerLazySingleton<WatchdogBoard>(() => WatchdogBoard.shared);
   }
 }

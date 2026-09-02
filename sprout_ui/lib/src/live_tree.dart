@@ -5,11 +5,11 @@ import 'package:sprout_protocol/protocol.dart';
 import 'package:sprout_protocol/snapshot.dart';
 import 'package:sprout_protocol/values.dart';
 
-/// The event kind announcing a subagent node for the first time.
+/// The event kind announcing a node for the first time.
 ///
 /// **Written here a second time, and a test compares the two.** The producer's
-/// spelling is `subagentObservedKind` in
-/// `sproutd/lib/src/runner/projection.dart`, and this package cannot import it:
+/// spelling is `nodeObservedKind` in
+/// `sproutd/lib/src/store/sprout_store.dart`, and this package cannot import it:
 /// `package:sproutd` reaches `dart:io` and `dart:ffi` and so cannot be compiled
 /// for the browser at all — that was finding F-07. Their real home is
 /// `sprout_protocol`, beside the frames, and moving them there is the actual
@@ -17,24 +17,24 @@ import 'package:sprout_protocol/values.dart';
 /// fails if the strings drift. Two lists that must stay equal is the shape of
 /// F-01, and what made F-01 a bug was not the duplication but that nothing
 /// compared the two.
-const String subagentObservedKind = 'runner.observed';
+const String nodeObservedKind = 'runner.observed';
 
-/// The event kind announcing that a subagent already in the feed changed.
+/// The event kind announcing that a node already in the feed changed.
 ///
-/// See [subagentObservedKind] for why this string is written twice.
+/// See [nodeObservedKind] for why this string is written twice.
 ///
 /// This is the kind the board actually depends on. In the Phase 0 `B.ndjson`
 /// capture both subagents are announced with a **null** `current_task` and
 /// given one several seconds later by this event, so a client that handled
 /// creation and ignored updates would render two permanently blank tasks and
 /// look entirely healthy doing it.
-const String subagentUpdatedKind = 'runner.updated';
+const String nodeUpdatedKind = 'runner.updated';
 
 /// What a node's line says when the feed has mentioned it but never described
 /// it.
 ///
 /// Reached when an event arrives for a node id that was in neither the
-/// snapshot nor a [subagentObservedKind] event. The node is **shown**, not
+/// snapshot nor a [nodeObservedKind] event. The node is **shown**, not
 /// dropped: an id sprout is emitting events about is a real node, and a
 /// consumer that hid it would report a smaller tree than exists — which is the
 /// runaway this project exists to surface.
@@ -108,14 +108,18 @@ final class LiveTree {
   /// Node ids the feed has emitted events about that this client has never
   /// been told the shape of, and how many such events each has had.
   ///
-  /// **Not empty in normal operation, and that is a real gap rather than a
-  /// defensive flourish.** `SproutStore.putNode` writes no event, so a root
-  /// created by `sprout run` after this client attached appears in the feed
-  /// only as `runner.spawned` — an event carrying a pid and a command line,
-  /// not a node row. Measured: attaching to a fresh daemon and then starting a
-  /// run leaves the root here and never in [nodes], while both subagents
-  /// arrive properly through [subagentObservedKind]. See
-  /// `docs/02-open-findings.md`.
+  /// **Empty in normal operation now, and kept anyway.** It used to hold the
+  /// root of every run: `SproutStore.putNode` wrote a row and no event, so a
+  /// root created by `sprout run` after this client attached appeared in the
+  /// feed only as `runner.spawned` — an event carrying a pid and a command
+  /// line, not a node row. That was F-10, and `putNode` now announces the row
+  /// it writes, so the root arrives here through [nodeObservedKind] exactly as
+  /// the subagents always did.
+  ///
+  /// This path stays because the case it covers is real and is not the one
+  /// F-10 fixed: an id sprout emits events about with no node row behind it is
+  /// still a node, and a consumer that hid it would report a smaller tree than
+  /// exists — which is the runaway this project exists to surface.
   final Map<String, int> strangers;
 
   /// Why the event feed could not be read, or null if it was read.
@@ -254,7 +258,7 @@ final class LiveTree {
   ) {
     final at = nodes.indexWhere((n) => n.node.id == event.nodeId);
     switch (event.kind) {
-      case subagentObservedKind:
+      case nodeObservedKind:
         if (at >= 0) {
           // The projection appends this exactly once per node. A second one
           // means the feed disagrees with itself, and the honest reading is
@@ -263,7 +267,7 @@ final class LiveTree {
           return;
         }
         _insert(nodes, _observed(event, nodes));
-      case subagentUpdatedKind:
+      case nodeUpdatedKind:
         if (at < 0) {
           strangers[event.nodeId] = (strangers[event.nodeId] ?? 0) + 1;
           return;

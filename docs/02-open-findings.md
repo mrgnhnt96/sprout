@@ -17,34 +17,12 @@ are quoted in the entry.
 
 ## Open
 
-### F-10 — A node written with `putNode` never reaches the feed, so a root cannot be built from deltas
-
-**Status: OPEN. It is the root-shaped half of F-02.** Found by the P3-04 Crawler, measured.
-**Fix lives in** `sproutd/lib/src/runner/session_runner.dart` and/or
-`sproutd/lib/src/store/sprout_store.dart`, which P3-04 did not own.
-
-F-02 made *subagent* creation reach the feed: `StoreProjection._syncSubagents` appends
-`runner.observed` beside the row it writes, so a consumer holding a snapshot plus every delta since
-learns the node exists without re-snapshotting. The root has no counterpart.
-`SessionRunner.launch` calls `store.putNode(...)` and appends nothing; `SproutStore.putNode` writes
-a row and never touches the feed. `runner.spawned` follows, but it carries a pid, a command line
-and a budget — not a node row, and deriving `current_task` from the launch's argv would be a guess.
-`LiveSession._markRoot` changes the root's status the same silent way.
-
-Measured: a client attached to a fresh daemon, then a `sprout run` started, ends with **both**
-subagents rendering correctly and the root known only as an id with 119 events against it. The UI
-shows it as `? · <id> · not described on this stream · 119 events` rather than dropping it —
-`LiveTree.strangers` — because an id sprout is emitting events about is a real node and hiding it
-would report a smaller tree than exists. But the honest board is still missing the root's project,
-task and status.
-
-The fix is an event beside the row, exactly as F-02 did for subagents.
-`sprout_ui/test/kinds_test.dart` fails the day one is added, and says so in its reason.
-
 ### F-11 — `runner.observed` / `runner.updated` are wire vocabulary that lives in `sproutd`
 
 **Status: OPEN, low cost, high leverage.** Found by the P3-04 Crawler. **Fix lives in**
-`sprout_protocol/lib/` and `sproutd/lib/src/runner/projection.dart`.
+`sprout_protocol/lib/` and `sproutd/lib/src/store/sprout_store.dart` — the store, not the
+projection: F-10's fix moved the two constants there, beside the `putNode` that emits them, and
+renamed them `nodeObservedKind` / `nodeUpdatedKind` because they now announce the root too.
 
 Those two `kind` strings travel over the socket and a browser branches on them, which makes them
 part of the protocol — but they are declared in `sproutd`, which `sprout_ui` cannot import at all

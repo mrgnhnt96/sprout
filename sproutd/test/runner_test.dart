@@ -192,8 +192,14 @@ void main() {
       expect(gate.refusals[RefusalReason.budget], 1);
       expect(gate.permitted, 0);
 
-      final recorded = events('root').single;
-      expect(recorded.kind, 'runner.refused');
+      // The node announced itself first: the row is written before the gate
+      // is asked, so even a refusal is reported against a node an attached
+      // consumer has already been told the shape of.
+      expect(events('root').map((e) => e.kind), [
+        nodeObservedKind,
+        'runner.refused',
+      ]);
+      final recorded = events('root').last;
       expect(recorded.payload['reason'], 'budget');
       expect(recorded.payload['refusals'], {
         'depthCap': 0,
@@ -235,7 +241,10 @@ void main() {
           runner(launcher).launch(request()),
           throwsA(isA<ProcessException>()),
         );
-        expect(events('root').map((e) => e.kind), ['runner.launch_failed']);
+        expect(events('root').map((e) => e.kind), [
+          nodeObservedKind,
+          'runner.launch_failed',
+        ]);
       },
     );
   });
@@ -279,10 +288,19 @@ void main() {
 
     test('the run is bracketed by runner events carrying the summary', () {
       final kinds = events().map((e) => e.kind).toList();
-      expect(kinds.first, 'runner.spawned');
+      // The node introduces itself before the launch it is about: `putNode`
+      // announces the row in the same call it writes it, so a consumer never
+      // reads an event against a node it has not been told about. That
+      // ordering is the whole of F-10.
+      expect(kinds.first, nodeObservedKind);
+      expect(kinds[1], 'runner.spawned');
+      // The first frame off the stream moves the root to `working`, and that
+      // transition reaches the feed too — a board built from deltas alone
+      // would otherwise show the root stuck on `spawning` for the whole run.
+      expect(kinds[2], nodeUpdatedKind);
       // A opens with a hook frame, not init; the session is recorded the
       // moment init is folded in, just before init's own event.
-      expect(kinds[1], 'frame.system.hook_started');
+      expect(kinds[3], 'frame.system.hook_started');
       final init = kinds.indexOf('frame.system.init');
       expect(kinds.indexOf('runner.session'), init - 1);
       expect(kinds.last, 'runner.exited');
@@ -318,6 +336,53 @@ void main() {
     setUp(() async {
       bytes = _fixture('B.ndjson');
       ended = await runner(_replaying(bytes)).run(request()) as EndedSession;
+    });
+
+    test('the root can be rebuilt from the feed alone, status and all', () {
+      // F-10. The bug this replaces was invisible to any test that read the
+      // store afterwards, because a snapshot always shows the root; it only
+      // appeared to a consumer that attached BEFORE the run existed and had
+      // nothing but deltas to build from. So this asserts the feed, never
+      // `store.node`.
+      final own = events('root');
+
+      final observed = own.firstWhere((e) => e.kind == nodeObservedKind);
+      expect(own.first, observed, reason: 'nothing may precede the node');
+      expect(
+        own.where((e) => e.kind == nodeObservedKind),
+        hasLength(1),
+        reason: 'a node is created once, however often it changes',
+      );
+      expect(observed.payload['parent_id'], isNull);
+      expect(observed.payload['project'], tmp.path);
+      expect(observed.payload['current_task'], 'say hi');
+      expect(observed.payload['status'], NodeStatus.spawning.wire);
+
+      // Then every transition, in order, so a consumer folding creation and
+      // updates arrives at the status the store holds rather than at the one
+      // the root launched with.
+      final statuses = own
+          .where((e) => e.kind == nodeUpdatedKind)
+          .map((e) => e.payload['status'])
+          .whereType<Map<Object?, Object?>>()
+          .toList();
+      expect(statuses, [
+        {'from': NodeStatus.spawning.wire, 'to': NodeStatus.working.wire},
+        {'from': NodeStatus.working.wire, 'to': NodeStatus.checkpointed.wire},
+      ]);
+      expect(store.node('root')!.status, NodeStatus.checkpointed);
+    });
+
+    test('the root is announced once, not once per frame', () {
+      // The other half of F-10's fix: `_markRoot` runs on every frame after
+      // the first, and an event per call would turn the run into a flood on
+      // the feed a UI reads. Bounded against the frame count, so this fails
+      // loudly if the suppression is ever dropped.
+      final announcements = events(
+        'root',
+      ).where((e) => e.kind == nodeObservedKind || e.kind == nodeUpdatedKind);
+      expect(announcements, hasLength(3));
+      expect(frameEvents(), hasLength(greaterThan(100)));
     });
 
     test('the subagents are nodes under the root, in the observed chain', () {
@@ -388,14 +453,14 @@ void main() {
         final own = events(id);
         expect(
           own.first.kind,
-          subagentObservedKind,
+          nodeObservedKind,
           reason:
               'the node event must precede the first frame attributed to it, '
               'or a consumer reads an event against a node it has not heard '
               'of',
         );
         expect(
-          own.where((e) => e.kind == subagentObservedKind),
+          own.where((e) => e.kind == nodeObservedKind),
           hasLength(1),
           reason: 'a node is created once, however often it changes',
         );
@@ -422,7 +487,7 @@ void main() {
         // tree showing them still working forever.
         for (final id in [child, grandchild]) {
           final updates = events(id)
-              .where((e) => e.kind == subagentUpdatedKind)
+              .where((e) => e.kind == nodeUpdatedKind)
               .toList();
           expect(updates, isNotEmpty);
           final status = updates
@@ -455,8 +520,7 @@ void main() {
     test('a consumer that only reads the feed learns every node', () {
       final named = {
         for (final event in events())
-          if (event.kind == 'runner.spawned' ||
-              event.kind == subagentObservedKind)
+          if (event.kind == 'runner.spawned' || event.kind == nodeObservedKind)
             event.nodeId,
       };
       expect(named, {'root', child, grandchild});
@@ -589,7 +653,7 @@ void main() {
       );
       expect(ended.transcript.tree.orphans, hasLength(1));
       expect(events('root/toolu_orphan').map((e) => e.kind), [
-        subagentObservedKind,
+        nodeObservedKind,
         'frame.assistant',
       ], reason: 'even an orphan announces itself, ahead of its own frame');
       expect(
@@ -628,13 +692,13 @@ void main() {
               .toList();
 
       projection.observe(frame);
-      expect(nodeEvents(), [subagentObservedKind]);
+      expect(nodeEvents(), [nodeObservedKind]);
 
       projection.observe(frame);
       projection.observe(frame);
       expect(
         nodeEvents(),
-        [subagentObservedKind],
+        [nodeObservedKind],
         reason:
             'nothing about the node moved, so neither a creation nor an '
             'update belongs in the feed',

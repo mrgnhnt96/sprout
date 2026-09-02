@@ -96,10 +96,9 @@ Verified against the compiled binary run from `/`, not just on a branch — the 
 entry leaves it in exactly one way: a commit that fixes it, which deletes the entry and says so.
 Nothing is closed there by being read.
 
-Eleven have been recorded so far and eight are fixed. Three are open, and the doc has them in
-full: **F-10** (a node written with `putNode` never reaches the feed, so a root cannot be built
-from deltas alone) and **F-11** (two wire `kind` strings are declared in `sproutd`, which the
-browser client cannot import, so it spells them a second time) are both sprout's.
+Eleven have been recorded so far and nine are fixed. Two are open, and the doc has them in full:
+**F-11** (two wire `kind` strings are declared in `sproutd`, which the browser client cannot
+import, so it spells them a second time) is sprout's.
 
 **F-08** is `game_loop`'s rather than sprout's: its rule-file guard reads the command string, so a
 `python3` heredoc writes a policy file without passing through the authorization that would record

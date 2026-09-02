@@ -500,12 +500,15 @@ void main() {
       // The mechanism behind "one instant": events at or below the position
       // can never change, so reading them later still lands at the cursor.
       putNode(store, 'root');
+      // After the row's own announcement, so the two results below are what
+      // this test is counting.
+      final base = store.cursor;
       final first = appendResult(store, 'root', 1.0);
       appendResult(store, 'root', 2.0);
 
       final events = StoreSnapshotSource(store).eventsUpTo(first);
-      expect([for (final event in events) event.seq], [first]);
-      expect(StoreSnapshotSource(store).eventsUpTo(first + 1).length, 2);
+      expect([for (final event in events) event.seq], [base, first]);
+      expect(StoreSnapshotSource(store).eventsUpTo(first + 1).length, 3);
     });
   });
 

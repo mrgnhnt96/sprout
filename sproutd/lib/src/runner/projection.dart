@@ -8,24 +8,6 @@ import '../../stream.dart';
 /// to something the runner itself recorded (`runner.*`).
 const String frameKindPrefix = 'frame.';
 
-/// The event appended when a subagent node is recorded for the first time.
-///
-/// The runner does not launch a subagent — Claude Code does — so there is no
-/// `runner.spawned` for one. This is its counterpart: it is attributed to the
-/// subagent's own id, exactly as `runner.spawned` is attributed to the root's,
-/// and it is what lets a consumer holding a snapshot plus every delta since
-/// learn that the node exists without taking a fresh snapshot.
-const String subagentObservedKind = 'runner.observed';
-
-/// The event appended when a subagent node already in the feed changes.
-///
-/// A subagent's `status` and `current_task` both move while it runs, and a
-/// feed that announced the node once and then went quiet would leave a live
-/// tree showing a node frozen on its first label. Separate from
-/// [subagentObservedKind] so that a change is never mistaken for a second
-/// creation of the same node.
-const String subagentUpdatedKind = 'runner.updated';
-
 /// Projects one session's stream into the store as it arrives.
 ///
 /// Every frame becomes one event, attributed to the node that emitted it — the
@@ -164,54 +146,19 @@ final class StoreProjection {
         since: previous?.since ?? _clock(),
       );
       if (previous != null && _same(previous, next)) continue;
-      store.putNode(next);
-      // The event is appended here, beside the row it describes, so that a
-      // row can never be written without the feed learning of it. `_same`
-      // above is what keeps this from firing once per frame: an update event
-      // is appended only when a field a consumer renders actually moved.
-      store.append(
-        nodeId: id,
-        kind: previous == null ? subagentObservedKind : subagentUpdatedKind,
-        payload: previous == null
-            ? _observedPayload(toolUseId, next)
-            : _updatedPayload(toolUseId, previous, next),
-        ts: _clock(),
-      );
+      // `putNode` appends the event itself, beside the row it describes, so a
+      // row cannot be written without the feed learning of it — see
+      // [nodeObservedKind]. `_same` above only spares the write; suppressing
+      // the no-op *event* is the store's job and not repeated here.
+      //
+      // `tool_use_id` is the one fact about a subagent the row does not hold:
+      // the node id encodes it, but only a consumer that knows how ids are
+      // minted could recover it, and that is not something the wire should
+      // make a reader guess.
+      store.putNode(next, announce: {'tool_use_id': toolUseId}, ts: _clock());
       _subagents[id] = next;
     }
   }
-
-  /// The whole node, so a consumer can build the row from this event alone
-  /// rather than having to re-`snapshot` to learn the fields.
-  static Map<String, Object?> _observedPayload(
-    String toolUseId,
-    SproutNode node,
-  ) => {
-    'tool_use_id': toolUseId,
-    'parent_id': node.parentId,
-    'project': node.project,
-    'status': node.status.wire,
-    'current_task': node.currentTask,
-  };
-
-  /// Only what moved, each as `{from, to}`.
-  ///
-  /// A consumer that has applied the [subagentObservedKind] event already
-  /// holds the rest, and spelling out the unchanged fields would make a
-  /// status flip indistinguishable from a re-creation in the feed.
-  static Map<String, Object?> _updatedPayload(
-    String toolUseId,
-    SproutNode previous,
-    SproutNode next,
-  ) => {
-    'tool_use_id': toolUseId,
-    if (previous.parentId != next.parentId)
-      'parent_id': {'from': previous.parentId, 'to': next.parentId},
-    if (previous.status != next.status)
-      'status': {'from': previous.status.wire, 'to': next.status.wire},
-    if (previous.currentTask != next.currentTask)
-      'current_task': {'from': previous.currentTask, 'to': next.currentTask},
-  };
 
   NodeStatus _statusOf(String toolUseId) {
     for (final task in transcript.tasks.tasks.values) {

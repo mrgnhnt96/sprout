@@ -109,6 +109,10 @@ final class SessionRunner {
     final tree = ledger ?? SpendLedger.empty();
     final now = _clock();
 
+    // `putNode` announces the row on the feed in the same call, so this is
+    // also where the root introduces itself to a consumer that attached before
+    // the run existed. It happens before the gate is asked, so even a refusal
+    // is reported against a node the feed has described.
     store.putNode(
       SproutNode(
         id: nodeId,
@@ -117,6 +121,7 @@ final class SessionRunner {
         currentTask: request.task,
         since: now,
       ),
+      ts: now,
     );
 
     final decision = gate.admit(
@@ -330,10 +335,16 @@ final class LiveSession implements SessionStart {
     _frames.add(frame);
   }
 
+  /// Moves the root to [status], and lets the feed say so.
+  ///
+  /// The transition has to reach the feed as well as the row: a consumer built
+  /// from deltas alone would otherwise show the root stuck on the status it
+  /// launched with for the whole run. `putNode` appends the `runner.updated`
+  /// itself, and appends nothing when the status did not actually move.
   void _markRoot(NodeStatus status) {
     final store = _projection.store;
     final node = store.node(nodeId);
     if (node == null) return;
-    store.putNode(node.copyWith(status: status));
+    store.putNode(node.copyWith(status: status), ts: _clock());
   }
 }

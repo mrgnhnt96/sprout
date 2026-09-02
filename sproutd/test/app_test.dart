@@ -214,7 +214,9 @@ void main() {
         store.append(nodeId: 'a', kind: 'runner.spawned');
 
         final snapshot = TreeController(store).snapshot();
-        expect(Cursor.parse(snapshot['cursor']! as String).position, 1);
+        // Three rows, each announcing itself as it was written, then the
+        // `runner.spawned` above: the cursor is the head of that feed.
+        expect(Cursor.parse(snapshot['cursor']! as String).position, 4);
         final nodes = (snapshot['nodes'] as List).cast<Map<String, Object?>>();
         // Depth first, each parent immediately before its own children —
         // `takeSnapshot`'s order, not the store's breadth-first tree().

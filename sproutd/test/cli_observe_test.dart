@@ -19,7 +19,6 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:sproutd/protocol.dart';
-import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
@@ -451,16 +450,16 @@ void main() {
         expect(knownAfter.containsAll(namedByDeltas), isTrue);
         expect(knownAfter.containsAll(knownBefore), isTrue);
         expect(knownAfter.length, greaterThan(knownBefore.length));
-        // A new ROOT announces itself: `runner.spawned` is appended against
+        // A new ROOT announces itself: `runner.observed` is appended against
         // its own id, so the consumer learns of it from the feed alone.
         expect(namedByDeltas.difference(knownBefore), isNotEmpty);
 
         // **And a subagent node announces itself too** (F-02, repaired).
-        // `StoreProjection._syncSubagents` appends `runner.observed` against
-        // the subagent's own id in the same pass that writes its row, so a
-        // consumer holding this snapshot plus every delta after it learns of
-        // every new node from `watch` alone. Nothing here needs a second
-        // `snapshot`.
+        // `SproutStore.putNode` appends `runner.observed` against the node's
+        // own id in the same call that writes its row — root and subagent
+        // alike, which is what F-10 made true of the root — so a consumer
+        // holding this snapshot plus every delta after it learns of every new
+        // node from `watch` alone. Nothing here needs a second `snapshot`.
         final invisible = knownAfter.difference(
           knownBefore.union(namedByDeltas),
         );
@@ -473,17 +472,14 @@ void main() {
               'only a fresh snapshot can reveal',
         );
 
-        // The paired positives, so the assertion above cannot pass by the
-        // feed having gone quiet. Both halves of the announcement are
-        // present: a new ROOT via `runner.spawned`, and every new SUBAGENT
-        // via `runner.observed`. A missing root would mean `runner.spawned`
-        // stopped being appended.
+        // The paired positive, so the assertion above cannot pass by the
+        // feed having gone quiet. Every node that arrived — the root and both
+        // subagents — is named by a `runner.observed` of its own, which is the
+        // single announcement `putNode` makes whoever writes the row.
         final announced = {
           for (final delta in frames.whereType<DeltaFrame>())
             for (final event in delta.events)
-              if (event.kind == 'runner.spawned' ||
-                  event.kind == subagentObservedKind)
-                event.nodeId,
+              if (event.kind == nodeObservedKind) event.nodeId,
         };
         final arrived = knownAfter.difference(knownBefore);
         expect(arrived, isNotEmpty, reason: 'the second capture added nodes');

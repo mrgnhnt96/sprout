@@ -168,7 +168,10 @@ void main() {
       // A migration re-run would recreate the tables and lose these rows, so
       // the surviving data is the assertion — a version number alone would
       // still read correctly after a destructive re-run.
-      expect(second.eventsSince(0).single.kind, 'spawned');
+      expect(second.eventsSince(0).map((e) => e.kind), [
+        nodeObservedKind,
+        'spawned',
+      ]);
     });
 
     test('refuses a database written by a newer sprout', () {
@@ -343,11 +346,13 @@ void main() {
     test('seq is monotonic and gapless, including after a refused write', () {
       final store = SproutStore.memory();
       addTearDown(store.close);
-      store.putNode(aNode('root'));
+      // The row's own announcement is seq 1; everything below counts on
+      // from there.
+      expect(store.putNode(aNode('root')), 1);
 
-      expect(store.append(nodeId: 'root', kind: 'a'), 1);
-      expect(store.append(nodeId: 'root', kind: 'b'), 2);
-      expect(store.append(nodeId: 'root', kind: 'c'), 3);
+      expect(store.append(nodeId: 'root', kind: 'a'), 2);
+      expect(store.append(nodeId: 'root', kind: 'b'), 3);
+      expect(store.append(nodeId: 'root', kind: 'c'), 4);
 
       // A rejected insert must not burn a cursor value: Phase 2's
       // `watch --since` treats a gap as events it missed, so a hole here
@@ -356,8 +361,8 @@ void main() {
         () => store.append(nodeId: 'no-such-node', kind: 'x'),
         throwsA(isA<SqliteException>()),
       );
-      expect(store.append(nodeId: 'root', kind: 'd'), 4);
-      expect(store.cursor, 4);
+      expect(store.append(nodeId: 'root', kind: 'd'), 5);
+      expect(store.cursor, 5);
     });
 
     test('foreign_keys is ON: an event needs a node that exists', () {
@@ -370,8 +375,8 @@ void main() {
         () => store.append(nodeId: 'ghost', kind: 'spawned'),
         throwsA(isA<SqliteException>()),
       );
-      store.putNode(aNode('ghost'));
-      expect(store.append(nodeId: 'ghost', kind: 'spawned'), 1);
+      expect(store.putNode(aNode('ghost')), 1);
+      expect(store.append(nodeId: 'ghost', kind: 'spawned'), 2);
     });
 
     test('the feed is append-only, enforced by the database', () {
@@ -400,13 +405,17 @@ void main() {
         "INSERT INTO event (node_id, ts, kind, payload) VALUES ('root', "
         "'2026-09-01T00:00:00.000Z', 'later', '{}')",
       );
-      expect(store.eventsSince(0).map((e) => e.kind), ['spawned', 'later']);
+      expect(store.eventsSince(0).map((e) => e.kind), [
+        nodeObservedKind,
+        'spawned',
+        'later',
+      ]);
     });
 
     test('round-trips ts and a JSON payload', () {
       final store = SproutStore.memory();
       addTearDown(store.close);
-      store.putNode(aNode('root'));
+      final base = store.putNode(aNode('root'))!;
       final ts = DateTime.utc(2026, 9, 1, 12, 30);
       store.append(
         nodeId: 'root',
@@ -418,7 +427,7 @@ void main() {
         },
       );
 
-      final event = store.eventsSince(0).single;
+      final event = store.eventsSince(base).single;
       expect(event.ts, ts);
       expect(event.kind, 'tool_use');
       expect(event.payload['name'], 'Bash');
@@ -428,12 +437,14 @@ void main() {
     test('eventsSince resumes strictly after the cursor', () {
       final store = SproutStore.memory();
       addTearDown(store.close);
-      store.putNode(aNode('root'));
+      // Measured from after the row's announcement, so the five events below
+      // are the whole of what this test put in the feed.
+      final base = store.putNode(aNode('root'))!;
       for (var i = 0; i < 5; i++) {
         store.append(nodeId: 'root', kind: 'e$i');
       }
 
-      expect(store.eventsSince(0).map((e) => e.kind), [
+      expect(store.eventsSince(base).map((e) => e.kind), [
         'e0',
         'e1',
         'e2',
@@ -442,9 +453,16 @@ void main() {
       ]);
       // Exclusive on the low end: the event at the cursor was already handled,
       // and redelivering it would double-count in Phase 2's consumer.
-      expect(store.eventsSince(2).map((e) => e.kind), ['e2', 'e3', 'e4']);
-      expect(store.eventsSince(5), isEmpty);
-      expect(store.eventsSince(0, limit: 2).map((e) => e.kind), ['e0', 'e1']);
+      expect(store.eventsSince(base + 2).map((e) => e.kind), [
+        'e2',
+        'e3',
+        'e4',
+      ]);
+      expect(store.eventsSince(base + 5), isEmpty);
+      expect(store.eventsSince(base, limit: 2).map((e) => e.kind), [
+        'e0',
+        'e1',
+      ]);
     });
 
     test('eventsSince can filter to one node without dropping the rest', () {
@@ -452,24 +470,132 @@ void main() {
       addTearDown(store.close);
       store
         ..putNode(aNode('a'))
-        ..putNode(aNode('b'))
+        ..putNode(aNode('b'));
+      final base = store.cursor;
+      store
         ..append(nodeId: 'a', kind: 'from-a')
         ..append(nodeId: 'b', kind: 'from-b');
 
-      expect(store.eventsSince(0, nodeId: 'a').map((e) => e.kind), ['from-a']);
+      expect(store.eventsSince(base, nodeId: 'a').map((e) => e.kind), [
+        'from-a',
+      ]);
       // Paired: with no filter both are still there, so the filter is
       // selecting rather than the second event having failed to land.
-      expect(store.eventsSince(0).map((e) => e.kind), ['from-a', 'from-b']);
+      expect(store.eventsSince(base).map((e) => e.kind), ['from-a', 'from-b']);
     });
 
     test('the cursor starts at zero and tracks the last append', () {
       final store = SproutStore.memory();
       addTearDown(store.close);
       expect(store.cursor, 0);
+      // A node row moves the cursor too, because writing one appends its
+      // announcement — see the `putNode announces` group.
       store.putNode(aNode('root'));
-      expect(store.cursor, 0);
-      store.append(nodeId: 'root', kind: 'spawned');
       expect(store.cursor, 1);
+      store.append(nodeId: 'root', kind: 'spawned');
+      expect(store.cursor, 2);
+    });
+  });
+
+  group('putNode announces the node it writes', () {
+    test('a new row appends runner.observed carrying the whole node', () {
+      final store = SproutStore.memory();
+      addTearDown(store.close);
+
+      final seq = store.putNode(
+        SproutNode(
+          id: 'root',
+          project: '/w/root',
+          status: NodeStatus.spawning,
+          currentTask: 'orchestrate',
+        ),
+      );
+
+      final event = store.eventsSince(0).single;
+      expect(seq, event.seq);
+      expect(event.kind, nodeObservedKind);
+      // Attributed to the node's own id, exactly as `runner.spawned` is, so a
+      // consumer folding by `node_id` files it against the right node.
+      expect(event.nodeId, 'root');
+      // The whole row, so a consumer that attached before this node existed
+      // can build it from the feed alone and never re-`snapshot`. This is the
+      // half F-10 was missing for the root.
+      expect(event.payload, {
+        'parent_id': null,
+        'project': '/w/root',
+        'status': NodeStatus.spawning.wire,
+        'current_task': 'orchestrate',
+      });
+    });
+
+    test('a real change appends runner.updated with only what moved', () {
+      final store = SproutStore.memory();
+      addTearDown(store.close);
+      store.putNode(aNode('root', status: NodeStatus.spawning));
+      final base = store.cursor;
+
+      store.putNode(aNode('root', status: NodeStatus.working));
+
+      final event = store.eventsSince(base).single;
+      expect(event.kind, nodeUpdatedKind);
+      // Not a second creation, and not a restatement of the unchanged fields:
+      // spelling those out would make a status flip indistinguishable from a
+      // node being recreated.
+      expect(event.payload, {
+        'status': {
+          'from': NodeStatus.spawning.wire,
+          'to': NodeStatus.working.wire,
+        },
+      });
+    });
+
+    test('a write that moves nothing a board renders appends nothing', () {
+      final store = SproutStore.memory();
+      addTearDown(store.close);
+      store.putNode(aNode('root'));
+      final base = store.cursor;
+
+      // The status-poll case: the same row written again. An event per write
+      // would turn a poll into a flood on the feed a UI reads.
+      expect(store.putNode(aNode('root')), isNull);
+      expect(store.eventsSince(base), isEmpty);
+
+      // The paired positive, so the silence above is suppression and not a
+      // store that has stopped announcing altogether.
+      expect(
+        store.putNode(aNode('root', status: NodeStatus.checkpointed)),
+        isNotNull,
+      );
+      expect(store.eventsSince(base).single.kind, nodeUpdatedKind);
+    });
+
+    test('announce rides along and cannot overwrite the row', () {
+      final store = SproutStore.memory();
+      addTearDown(store.close);
+
+      store.putNode(
+        aNode('root'),
+        announce: {'tool_use_id': 'toolu_1', 'status': 'nonsense'},
+      );
+
+      final event = store.eventsSince(0).single;
+      // The extra fact travels: `tool_use_id` is the one thing about a
+      // subagent the row does not hold.
+      expect(event.payload['tool_use_id'], 'toolu_1');
+      // ...but a caller cannot describe the row as something other than what
+      // was written, or the feed and the table would disagree.
+      expect(event.payload['status'], NodeStatus.working.wire);
+      expect(store.node('root')!.status, NodeStatus.working);
+    });
+
+    test('the announcement carries the timestamp it was given', () {
+      final store = SproutStore.memory();
+      addTearDown(store.close);
+      final ts = DateTime.utc(2026, 9, 1, 12, 30);
+
+      store.putNode(aNode('root'), ts: ts);
+
+      expect(store.eventsSince(0).single.ts, ts);
     });
   });
 }

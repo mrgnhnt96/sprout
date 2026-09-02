@@ -7,9 +7,10 @@ from *outside* the sessions.**
 > either done or visibly in progress — with a web UI that shows every agent, from the top-level
 > down to the deepest nested one, and what each is doing right now.
 
-**Status: in development.** Phases 0–3 are built, tested and verified against a compiled binary
-run from `/`. The binary serves the web UI out of its own constants, and that UI builds the live
-tree from one snapshot plus deltas. See [Where it actually is](#where-it-actually-is).
+**Status: in development.** Phases 0–3 and 6 are built, tested and verified against a compiled
+binary run from `/`. `sprout ui` starts the daemon and serves the web UI out of the binary's own
+constants; the UI builds the live tree from one snapshot plus deltas; and a watchdog outside the
+sessions notices when one stops working. See [Where it actually is](#where-it-actually-is).
 
 ## Seeing it
 
@@ -122,7 +123,9 @@ aspirational: see [Building it](#building-it).
 | 1 | Daemon skeleton — store, stream parser, containment, runner | ✅ done, 135 tests |
 | 2 | Observation — protocol, snapshot, `watch --since`, WebSocket | ✅ done, 242 tests |
 | 3 | The UI — live tree over the socket | ✅ done, 338 tests |
-| 4–7 | Roles, endings, steer | ⬜ not started |
+| 4–5 | Delegation, autonomy | ⬜ not started |
+| 6 | The watchdog — outside the sessions | ✅ done, 443 tests |
+| 7 | Steer | ⬜ not started |
 
 **Phase 0** settled the stream envelope, `parent_tool_use_id` sufficiency, the real hook field
 names and mid-run steering against a live CLI (v2.1.252, six probes, $0.34). Raw captures are on

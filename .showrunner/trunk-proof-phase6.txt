@@ -1,0 +1,66 @@
+Trunk proof — Phase 6, the watchdog, against the COMPILED binary run from /
+sprout HEAD fa05c43, 2026-09-02. One binary, 8,621,936 bytes.
+Knobs for the demo: sweep 2s, frozen after 3s, settle 0.5s (shipped defaults 30s / 5m / 5s).
+
+=== BEFORE (binary at db658ad — sprout ui and the board, but no watchdog) ===
+PRE-PHASE-6 consumer verdict — a session hangs and nobody notices
+Binary built at db658ad: has sprout ui, has the board, has no watchdog.
+Same stand-in as the after run: writes 20 lines, then sleeps 600. Live pid,
+frozen transcript. Waited 45 seconds, six times the threshold the fixed build uses.
+
+Everything sprout said in that time, in full:
+
+  http://127.0.0.1:8788/
+  db  /private/tmp/claude-501/-Users-mrgnhnt96-Development-dart-sprout/D0B0C70B-48A1-44B3-A1F9-839AA09244F8/scratchpad/prewd/.sprout/sprout.db
+  Ctrl-C to stop.
+
+That is the whole output. No ring, no verdict, no frame, no line in any journal.
+The board renders the node as working, because that is what the store records and
+nothing outside the session ever asked whether it was true.
+
+This is the failure the project exists for, reproduced small: 'a real run sat inert
+for six hours with all gates reporting healthy. A stuck session cannot notice it is
+stuck.' Here it is 45 seconds instead of six hours, and nothing noticed either.
+
+=== AFTER (binary at trunk) ===
+
+$ sprout ui
+http://127.0.0.1:8789/
+db  /private/tmp/claude-501/-Users-mrgnhnt96-Development-dart-sprout/D0B0C70B-48A1-44B3-A1F9-839AA09244F8/scratchpad/wdhome/.sprout/sprout.db
+watchdog  sweep 2s · frozen after 3s · settle 0.5s → /private/tmp/claude-501/-Users-mrgnhnt96-Development-dart-sprout/D0B0C70B-48A1-44B3-A1F9-839AA09244F8/scratchpad/wdhome/.sprout/watchdog.ndjson
+Ctrl-C to stop.
+
+Then a run whose stand-in writes 20 lines and then sleeps 600 — a REAL stall:
+live pid, frozen transcript. Rings on the daemon's stderr:
+sprout watchdog: mtko31vt-ed147022 is stalled (ring 1) — pid 62583 is alive and started at 2026-09-02 22:27:54.000Z; the transcript last grew 3s ago (threshold 3s ago)
+sprout watchdog: mtko31vt-ed147022 is stalled (ring 2) — pid 62583 is alive and started at 2026-09-02 22:27:54.000Z; the transcript last grew 6s ago (threshold 3s ago)
+sprout watchdog: mtko31vt-ed147022 is stalled (ring 3) — pid 62583 is alive and started at 2026-09-02 22:27:54.000Z; the transcript last grew 8s ago (threshold 3s ago)
+
+The same thing on the wire, as a watchdog frame — a LEVEL, not an edge, so a consumer
+that attaches during a stall still sees it:
+  {"type":"watchdog","stalled":[{"node_id":"mtko31vt-ed147022","liveness":"stalled",
+   "because":"pid 62583 is alive and started at 2026-09-02 22:27:54.000Z; the transcript
+   last grew 21s ago (threshold 3s ago)","consecutive_rings":3,"silenced":true}],"blind":[]}
+
+THE RING CAP, AND ITS RESET — the half that makes the cap safe:
+  at cap    no ring: 1 node(s) still contradicted but are at the ring cap of 3
+            — silenced until each advances, not silenced for good   (and STILL SHOWN)
+  advanced  no ring: 1 node(s) advanced, so their ring counts reset
+  re-stall  rang for 1 of 1 node(s): mtko31vt-ed147022 stalled
+One appended transcript line was the whole recovery signal. Nothing wrote a status row:
+NodeStatus has no stalled member, on purpose, so a recovered node stops being stalled
+without anything having to un-write anything.
+
+EVERY QUIET SWEEP CARRIES ITS OWN WHY, so a watchdog that is silent because it is
+healthy is distinguishable from one that is silent because it died:
+  - no ring: the tree is empty, so there was nothing to contradict
+  - no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  - rang for 1 of 1 node(s): mtko31vt-ed147022 stalled
+  - no ring: 1 node(s) still contradicted but are at the ring cap of 3 (mtko31vt-ed147022) — silenced until each advances, not silenced for good
+  - no ring: 1 node(s) advanced, so their ring counts reset (mtko31vt-ed147022)
+
+AND IT NEVER ACTED. After three rings and the cap, the stalled process was still alive:
+  62583 SN   Wed Sep  2 15:27:54 2026   /bin/sh .../hang-claude -p investigate the flaky...
+It had to be killed by hand at the end of this proof. Section 5: 'Never auto-reclaim a
+stalled node' — the real incident behind that rule held four uncommitted files and a
+green test suite. Surface it, page, never act.

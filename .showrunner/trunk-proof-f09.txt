@@ -1,0 +1,32 @@
+Trunk proof — F-09, newline-delimited frames, against COMPILED binaries run from /
+Two daemons on the SAME database, so the only variable is the code:
+  pre  = binary built at c767a14 (Phase 3 complete, F-09 present)
+  post = binary built at trunk after the F-09 merge
+
+PRE-F-09 consumer verdict — the wire
+  messages: 3   bytes: 1701
+  exactly 1024 B: 1   over 1024 B: 0   largest: 1024
+  newline bytes in the stream: 0
+  naive (one message = one frame): 1 decoded, 2 FAILED
+  split on '\n': 0 frames decoded, 0 failed, trailing partial 1701 B
+  VERDICT: NO usable delimiter — a consumer cannot split this stream
+
+POST-F-09 consumer verdict — the wire
+  messages: 3   bytes: 1703
+  exactly 1024 B: 1   over 1024 B: 0   largest: 1024
+  newline bytes in the stream: 2
+  naive (one message = one frame): 1 decoded, 2 FAILED
+  split on '\n': 2 frames decoded, 0 failed, trailing partial 0 B
+  VERDICT: newline-delimited — every frame recoverable
+
+Reading the two together:
+  - The newline count goes 0 -> 2, and the byte count goes 1701 -> 1703. The fix is
+    exactly those two bytes.
+  - The snapshot frame crosses a 1024-byte message boundary in BOTH runs. Before, the
+    whole 1701-byte stream is one unterminated run and a consumer splitting on newline
+    recovers nothing. After, it splits cleanly into 2 frames with no trailing partial.
+  - The naive read is 1 decoded / 2 FAILED in BOTH runs, and that is the point: this
+    change does NOT make one frame one WebSocket message, and nothing here should be
+    read as claiming it does. Chunking at 1024 bytes is unchanged. What the newline buys
+    is that reassembly is now possible at all, which it was not before.
+  - So sprout_ui/lib/src/frame_reader.dart is still required and is deliberately kept.

@@ -35,6 +35,27 @@ import os
 import statistics
 import sys
 
+
+# ------------------------------------------------------------- repo label ---
+# Claude Code names a project directory after its cwd with "/" replaced by "-",
+# so /Users/<you>/Development/dart/sprout is stored as
+# -Users-<you>-Development-dart-sprout. Deriving the prefix from $HOME keeps the
+# label short without baking a username into a tracked file.
+_HOME_ENCODED = os.path.expanduser("~").replace("/", "-")
+_REPO_PREFIXES = tuple(
+    "%s-%s-" % (_HOME_ENCODED, sub)
+    for sub in ("Development", "development", "Projects", "projects", "src", "code")
+) + ("%s-" % _HOME_ENCODED,)
+
+
+def repo_label(encoded):
+    """Strip the local path prefix from an encoded-cwd directory name."""
+    for prefix in _REPO_PREFIXES:
+        if encoded.startswith(prefix):
+            return encoded[len(prefix):]
+    return encoded
+
+
 # ---------------------------------------------------------------- pricing ---
 # $ per 1M tokens
 PRICES = {
@@ -629,7 +650,7 @@ def main():
             continue
         base = v["plain"] + v["orch"]
         row = {
-            "repo": p.replace("-Users-USER-Development-", ""),
+            "repo": repo_label(p),
             "n_crawlers": len(v["crawler"]),
             "crawler_cost_total_usd": round(sum(v["crawler"]), 2),
             "crawler_cost_median_usd": round(q(sorted(v["crawler"]), .5), 3),
@@ -771,7 +792,7 @@ def main():
     for m in mains:
         if attached[m["sid"]]:
             camp.append({
-                "repo": m["repo"].replace("-Users-USER-Development-", ""),
+                "repo": repo_label(m["repo"]),
                 "orchestrator_cost_usd": round(m["total_cost"], 2),
                 "crawlers": attached[m["sid"]],
                 "crawler_cost_usd": round(attached_cost[m["sid"]], 2),
@@ -826,7 +847,7 @@ def main():
         redundant_bytes = sum(repo_cmd_bytes[repo][h] * (len(ss) - 1)
                               for h, ss in shared.items())
         dupw.append({
-            "repo": repo.replace("-Users-USER-Development-", ""),
+            "repo": repo_label(repo),
             "distinct_commands": len(cmds),
             "commands_run_in_2plus_crawlers": len(shared),
             "pct_shared": pct(len(shared), len(cmds)),

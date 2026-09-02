@@ -1,0 +1,51 @@
+name: sprout_ui
+description: >-
+  sprout's web UI. Jaspr in client mode; `jaspr build` emits a static payload
+  that P3-03 embeds into the sproutd binary as generated Dart constants.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+# WHY THIS IS A SEPARATE PACKAGE AND NOT A WORKSPACE MEMBER.
+#
+# `revali` (sproutd's codegen CLI) and `jaspr_builder` cannot resolve together.
+# Observed, not read — one package declaring both:
+#
+#   Because revali >=2.1.0 depends on analyzer ^10.0.0 and jaspr_builder
+#   >=0.23.2 depends on analyzer ^12.1.0, revali >=2.1.0 is incompatible with
+#   jaspr_builder >=0.23.2.
+#
+# A `workspace:` key would put both in ONE resolution and reproduce exactly
+# that. Two packages, two lockfiles, no shared solve. Note the resolver names
+# `analyzer` directly; `docs/01-plan.md` §13 attributes the clash to a
+# `dart_style` pin, which is one hop further out than what pub actually
+# reports today.
+#
+# The split only works because `revali` is a DEV dependency of sproutd: a path
+# dependency pulls a package's regular dependencies, never its dev ones.
+
+dependencies:
+  # Pinned exactly, like sproutd's stack: docs/01-plan.md §13 records 0.23.4 as
+  # the version the payload pipeline was executed against.
+  jaspr: 0.23.4
+
+dev_dependencies:
+  # Pinned: emits the client bundle, and it is half of the conflict above.
+  jaspr_builder: 0.23.4
+  # The `jaspr` CLI as a dev dependency rather than a global install, so
+  # `dart run jaspr_cli:jaspr build` is reproducible on a machine that has
+  # never run `dart pub global activate`. P3-03 automates that command.
+  jaspr_cli: ^0.23.4
+  build_runner: ^2.10.0
+  # UPPER-BOUNDED DELIBERATELY, and not by preference. jaspr_builder 0.23.4
+  # wants analyzer ^12.1.0; build_web_compilers >=4.8.6 wants analyzer
+  # >=13.3.0. `jaspr create` scaffolds `^4.8.10` and the generated project does
+  # not resolve. Raise this bound only together with jaspr_builder.
+  build_web_compilers: ">=4.8.0 <4.8.6"
+  lints: ^6.0.0
+  test: ^1.25.0
+
+jaspr:
+  mode: client

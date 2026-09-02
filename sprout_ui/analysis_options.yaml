@@ -1,0 +1,16 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # Same posture as sproutd: the checks run `dart analyze --fatal-infos
+    # --fatal-warnings`, so every diagnostic already fails. Nothing is
+    # downgraded here.
+    todo: ignore
+  exclude:
+    # jaspr_builder writes .g.dart / .styles.json siblings into lib/ during a
+    # build; they are outputs, not sources.
+    - build/**

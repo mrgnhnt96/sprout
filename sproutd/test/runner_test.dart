@@ -13,6 +13,7 @@ import 'package:path/path.dart' as p;
 import 'package:sproutd/policy.dart';
 import 'package:sproutd/runner.dart';
 import 'package:sproutd/store.dart';
+import 'package:sproutd/stream.dart';
 import 'package:test/test.dart';
 
 const _fixtureRoot = '../docs/research/fixtures/phase0/streams';
@@ -382,6 +383,92 @@ void main() {
       expect(ended.totalMessageTokens, expected);
     });
 
+    test('each subagent announces itself before it emits anything', () {
+      for (final id in [child, grandchild]) {
+        final own = events(id);
+        expect(
+          own.first.kind,
+          subagentObservedKind,
+          reason:
+              'the node event must precede the first frame attributed to it, '
+              'or a consumer reads an event against a node it has not heard '
+              'of',
+        );
+        expect(
+          own.where((e) => e.kind == subagentObservedKind),
+          hasLength(1),
+          reason: 'a node is created once, however often it changes',
+        );
+      }
+
+      final observed = events(child).first;
+      expect(observed.payload['tool_use_id'], 'toolu_013CdYLPDjwGfSwE5gL5Q7BK');
+      expect(observed.payload['parent_id'], 'root');
+      expect(observed.payload['project'], tmp.path);
+      expect(observed.payload['status'], NodeStatus.working.wire);
+      // The node is known before its description is: B's subagent is first
+      // seen on a partial tool-use whose input has not been assembled yet.
+      // This is precisely why a creation event alone is not enough — the
+      // label a live tree renders arrives afterwards, in an update.
+      expect(observed.payload['current_task'], isNull);
+      expect(store.node(child)!.currentTask, 'Nested subagent chain test');
+    });
+
+    test(
+      'a subagent that finishes reports the change, not a second creation',
+      () {
+        // Both subagents end `checkpointed`, so both moved off `working` after
+        // being announced. A feed that only announced them would leave a live
+        // tree showing them still working forever.
+        for (final id in [child, grandchild]) {
+          final updates = events(id)
+              .where((e) => e.kind == subagentUpdatedKind)
+              .toList();
+          expect(updates, isNotEmpty);
+          final status = updates
+              .map((e) => e.payload['status'])
+              .whereType<Map<Object?, Object?>>()
+              .toList();
+          expect(status.last, {
+            'from': NodeStatus.working.wire,
+            'to': NodeStatus.checkpointed.wire,
+          });
+          // Only what moved: an update that reported every field would be
+          // indistinguishable from a re-creation.
+          expect(updates.last.payload.keys, isNot(contains('project')));
+
+          // A consumer folding creation then updates arrives at the label the
+          // store holds — the tree does not freeze on its first line.
+          final task = updates
+              .map((e) => e.payload['current_task'])
+              .whereType<Map<Object?, Object?>>()
+              .lastOrNull;
+          expect(
+            task?['to'] ?? events(id).first.payload['current_task'],
+            store.node(id)!.currentTask,
+            reason: 'the feed carries the label the tree renders',
+          );
+        }
+      },
+    );
+
+    test('a consumer that only reads the feed learns every node', () {
+      final named = {
+        for (final event in events())
+          if (event.kind == 'runner.spawned' ||
+              event.kind == subagentObservedKind)
+            event.nodeId,
+      };
+      expect(named, {'root', child, grandchild});
+      expect(
+        named,
+        containsAll(store.nodes().map((n) => n.id)),
+        reason:
+            'a node row the feed never announced is one only a fresh snapshot '
+            'can reveal — the gap F-02 recorded',
+      );
+    });
+
     test('both subagents completed, so nothing is left incomplete', () {
       expect(ended.incompleteTasks, isEmpty);
       expect(store.node(child)!.status, NodeStatus.checkpointed);
@@ -501,7 +588,58 @@ void main() {
         reason: 'a fragment root, reported not dropped',
       );
       expect(ended.transcript.tree.orphans, hasLength(1));
-      expect(events('root/toolu_orphan').single.kind, 'frame.assistant');
+      expect(events('root/toolu_orphan').map((e) => e.kind), [
+        subagentObservedKind,
+        'frame.assistant',
+      ], reason: 'even an orphan announces itself, ahead of its own frame');
+      expect(
+        events('root/toolu_orphan').first.payload['parent_id'],
+        'root/unobserved-parent',
+      );
+    });
+
+    test('an unchanged subagent appends no second event', () {
+      // The volume guard. `_same` already suppresses the no-op *row* write,
+      // and the event is appended beside the row, so a frame that changes
+      // nothing costs nothing. An event per frame would flood the feed a live
+      // UI reads.
+      store.putNode(
+        const SproutNode(id: 'root', project: 'p', status: NodeStatus.working),
+      );
+      final projection = StoreProjection(
+        store: store,
+        rootId: 'root',
+        project: 'p',
+        clock: DateTime.now,
+      );
+      final line = jsonEncode({
+        'type': 'assistant',
+        'uuid': 'u-1',
+        'session_id': 's',
+        'parent_tool_use_id': 'toolu_same',
+        'message': {'id': 'msg_1', 'role': 'assistant', 'content': <Object?>[]},
+      });
+      final frame = parseStreamJson('$line\n').single;
+
+      List<String> nodeEvents() =>
+          events('root/toolu_same')
+              .where((e) => !e.kind.startsWith(frameKindPrefix))
+              .map((e) => e.kind)
+              .toList();
+
+      projection.observe(frame);
+      expect(nodeEvents(), [subagentObservedKind]);
+
+      projection.observe(frame);
+      projection.observe(frame);
+      expect(
+        nodeEvents(),
+        [subagentObservedKind],
+        reason:
+            'nothing about the node moved, so neither a creation nor an '
+            'update belongs in the feed',
+      );
+      expect(store.node('root/toolu_same'), isNotNull);
     });
 
     test('the raw log is written before the store is', () async {

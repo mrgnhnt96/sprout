@@ -393,13 +393,16 @@ void main() {
       expect(wire.received.last, bye.encodeLine());
     });
 
-    test('nothing notices a hang-up without a ping, and that is the leak', () {
-      // The paired negative, and the reason the ping above matters. With no
-      // ping the socket is never read while the connect handler is streaming,
-      // so a client that hung up two seconds ago is indistinguishable from one
-      // that is simply quiet — and the session, its 15s heartbeat and its
-      // 250ms poll stay alive. This is what the generated route does TODAY,
-      // because revali drops the ping the annotation asks for.
+    test('without a ping nothing notices a hang-up, which is why it is set', () {
+      // The negative control for the teardown above, and the only thing that
+      // shows the ping is what does the work rather than something else in
+      // the handler. With no ping the socket is never read while the connect
+      // handler is streaming, so a client that hung up two seconds ago is
+      // indistinguishable from one that is simply quiet — and the session, its
+      // 15s heartbeat and its 250ms poll stay alive forever.
+      //
+      // This was the generated route until F-03 was fixed; `the generated
+      // shape` group is what pins that it no longer is.
       return _withWire((wire) async {
         await wire.skipToReady();
         await wire.socket.close();
@@ -414,8 +417,9 @@ void main() {
           wire.wakeups.hasListener,
           isTrue,
           reason:
-              'FIXME(P2-05 finding): if this now fails, disconnects are being '
-              'noticed and the per-client leak is gone — delete this test',
+              'a route built with no ping must still leak: if this fails the '
+              'teardown above is being caused by something other than the '
+              'ping, and that test no longer proves what it claims',
         );
         expect(wire.heartbeats.hasListener, isTrue);
       }, ping: null);
@@ -559,26 +563,64 @@ void main() {
       expect(source, contains("queryParameters['since']"));
     });
 
-    test('and revali DROPS the ping the annotation asks for', () {
-      // A pinned defect, not a preference. `WebSocketAnnotation.fromAnnotation`
-      // (revali_construct 3.0.0) reads Duration's private `_duration` field,
-      // which Dart 3.13.2 does not have — it declares the public
-      // `inMicroseconds` — so the ping never reaches the route and the
-      // generated socket has no disconnect detection at all. Nothing warns.
+    test('the ping the annotation asks for reaches the generated route', () {
+      // The assertion F-03 is closed by, and the reason `PingDuration` exists.
+      // revali_construct 3.0.0 reads the annotated ping as
+      // `getField('_duration')` — the private name Duration stored its
+      // microseconds under before the SDK made the value public — so a plain
+      // `Duration` yields null, `create_child_route.dart:48` emits no `ping`
+      // argument, and `revali build` succeeds with no warning at all. That
+      // silence is the whole hazard: the socket is then never read and never
+      // pinged, so no disconnect is ever noticed.
+      //
+      // This is a source-text assertion because that is where the failure
+      // lives. Nothing about a running socket distinguishes "the ping is set"
+      // from "the ping was dropped" until a client hangs up, which is exactly
+      // how it shipped unnoticed.
       final source = File('routes/controllers/tree_controller.dart')
           .readAsStringSync();
       expect(source, contains('ping: socketPingInterval'));
       if (!generated.existsSync()) {
-        markTestSkipped('run `dart run revali build` to check the drop');
+        markTestSkipped(
+          'run `dart run revali build`: the drop this pins is invisible '
+          'without the generated route to read',
+        );
         return;
       }
+      final emitted = generated.readAsStringSync();
       expect(
-        generated.readAsStringSync(),
-        isNot(contains('ping:')),
+        emitted,
+        contains('ping:'),
         reason:
-            'if this now passes the ping through, revali has been fixed: drop '
-            'this test and assert the ping is present instead',
+            'revali emitted no ping at all — the annotation was accepted and '
+            'discarded, which is F-03 exactly. Check that socketPingInterval '
+            'is still a PingDuration and that PingDuration still declares the '
+            '_duration field revali_construct reads.',
       );
+      // Not merely present, but the interval actually asked for: revali emits
+      // `Duration(microseconds: n)` from `ping.inMicroseconds`, so a ping that
+      // arrived truncated or zeroed would satisfy `contains('ping:')` and
+      // still never fire.
+      expect(
+        emitted,
+        contains(
+          'ping: Duration(microseconds: '
+          '${socketPingInterval.inMicroseconds})',
+        ),
+        reason:
+            'the generated ping must be socketPingInterval to the microsecond',
+      );
+    });
+
+    test('the ping constant is an ordinary Duration to everything else', () {
+      // `PingDuration` overrides `inMicroseconds` to return the private field
+      // the generator reads, so the two copies of the value cannot drift: if
+      // they ever did, the socket would be pinged at one interval while every
+      // reader here reported another.
+      expect(socketPingInterval, isA<Duration>());
+      expect(socketPingInterval, const Duration(seconds: 15));
+      expect(socketPingInterval.inMicroseconds, 15 * 1000 * 1000);
+      expect(socketPingInterval.inSeconds, 15);
     });
   });
 }
@@ -684,13 +726,13 @@ Future<_Wire> _serve({
               WebSocketRoute(
                 'events',
                 mode: WebSocketMode.twoWay,
-                // Shortened from `socketPingInterval` so the disconnect test
-                // is seconds rather than a minute, and passed straight to
-                // `WebSocketRoute` because the annotation's ping is dropped by
-                // revali (see the `generated shape` group). The ping is not a
-                // test convenience: without one the session is never torn down
-                // at all, because nothing reads the socket while the connect
-                // handler is still streaming.
+                // Shortened from `socketPingInterval` so the disconnect
+                // test is seconds rather than a minute. The ping is not a test
+                // convenience: without one the session is never torn down at
+                // all, because nothing reads the socket while the connect
+                // handler is still streaming. That the real annotation now
+                // puts a ping here too is what the `generated shape` group
+                // checks — this route is hand-built, so it cannot see it.
                 ping: ping,
                 handler: (context) async => WebSocketHandler(
                   onConnect: (context) async* {

@@ -15,35 +15,6 @@ are quoted in the entry.
 
 ---
 
-## F-03 — `@WebSocket.ping(...)` is silently dropped, and that leaks a session per disconnect
-
-**Status:** BLOCKING Phase 3 · **Found by:** P2-05 · **Fix lives in:** upstream
-`revali_construct`, or a local workaround in `sproutd/routes/controllers/`
-
-`revali_construct 3.0.0`'s `WebSocketAnnotation.fromAnnotation` reads `Duration`'s **private
-`_duration`** field, which Dart **3.13.2** replaced with the public `inMicroseconds`. The read
-yields null, `create_child_route.dart:48` emits no ping, and **`revali build` succeeds with no
-warning** — the annotation is accepted and then discarded.
-
-Why that is a leak rather than a cosmetic loss: while `runHandler(onConnect)` is streaming,
-`execute()` has not yet reached `listenToMessages()`. Nobody is reading the socket, so the peer's
-close frame is never processed, `closeCode` stays `null`, and `webSocket.add` keeps succeeding into
-a client that is gone. **A client hang-up is never noticed, and every disconnect leaks a watch
-session together with its 15s heartbeat timer and its 250ms poll timer.** A daemon that has been up
-for a day has one per browser refresh.
-
-**Measured on a real loopback socket, both halves:** still subscribed **12s** after the client left
-with no ping; torn down in **2219ms** at ping 1s and **1213ms** at 500ms. Paired tests in
-`sproutd/test/ws_test.dart` pin both — that teardown *does* work when the transport reports the
-disconnect, and that nothing reports it through the generated route today.
-
-**The fix:** passing a `Duration` straight to `WebSocketRoute(ping: ...)` works, so **only the
-annotation path is broken**. Either patch upstream, or bypass the annotation locally. Do not
-"solve" it with an application-level timeout — the socket is unread, so an application-level timer
-is watching the wrong thing.
-
----
-
 ## F-04 — `lib/protocol.dart` has no `SnapshotFrame`
 
 **Status:** OPEN · **Found by:** P2-05 · **Fix lives in:** `sproutd/lib/protocol.dart`
@@ -67,8 +38,12 @@ Adding `SnapshotFrame` belongs in that library, alongside the frames it already 
 `listenToMessages()`. On a long-lived socket the connect handler never completes, so the back
 channel is never serviced concurrently with server push. The socket is correctly negotiated as
 `twoWay` and the mode is the right choice — Phase 7's steer needs it — but a steer arriving on that
-channel needs a revali-side change, not just an application-side handler. Note this is the same
-underlying behaviour as F-03: nothing reads the socket while the handler streams.
+channel needs a revali-side change, not just an application-side handler.
+
+**Nothing reads the socket while the handler streams**, which is also why the socket carries a ping:
+the ping is timer-driven rather than read-driven, so it is the only thing that notices a peer that
+has gone. That half is fixed and pinned in `sproutd/test/ws_test.dart`; this half is not, and a
+timer cannot substitute for it — an unread inbound message is not late, it is unread.
 
 ---
 

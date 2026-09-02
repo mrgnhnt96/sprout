@@ -1,0 +1,22 @@
+Trunk proof — F-06 (and F-05, closed with it) against the COMPILED binary, daemon run from /
+sprout HEAD 80563de (merge of 81580b3), 2026-09-01.
+
+Two clients, one run, same daemon, so the only difference is whether the client pongs.
+
+=== BEFORE (binary built at 305e106, F-03 landed, F-06 present) ===
+PRE-F-06 consumer verdict — two clients, one run, compiled binary from /
+  client that DOES pong  : close 1001 at +30.0s | pings=1 frames=4
+  client that NEVER pongs : close 1001 at +30.0s | pings=1 frames=4
+
+VERDICT: the pong makes no difference — a healthy client is closed like a dead one
+
+=== AFTER (binary built at 80563de) ===
+POST-F-06 consumer verdict — two clients, one run, compiled binary from /
+  client that DOES pong  : STILL OPEN at +46.0s | pings=3 frames=6
+  client that NEVER pongs : close 1001 at +30.0s | pings=1 frames=5
+
+VERDICT F-06: FIXED — a healthy client survives and a dead one is reclaimed
+
+The pong now changes the outcome, which is the whole point: the socket is read
+concurrently with server push, so dart:io can deliver the pong and cancel the
+timer that closes an unanswered connection. A dead peer is still reclaimed at 30s.

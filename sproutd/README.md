@@ -9,18 +9,19 @@ directory: copied anywhere and run from any working directory, it works. The web
 package (`sprout_ui`, Phase 3) because `revali` and `jaspr_builder` conflict on analyzer versions
 via a `dart_style` pin — they must never share a package and never a Dart workspace.
 
-The single binary is produced by a five-step pipeline (`docs/research/05-dart-stack.md`, verified end
-to end on macOS arm64 at 7.88 MB):
+The single binary is produced by a five-step pipeline (`docs/research/05-dart-stack.md`). As built
+by P3-03 on macOS arm64: **8,080,208 bytes, one file**, serving a 110,640-byte UI payload.
 
 ```bash
-# 1. Build the UI — client mode, 5 files, ~220 KB of pure static output.
+# 1. Build the UI — client mode. Three files, 110,640 bytes of static output:
+#    index.html, main.css, main.client.dart.js.
 cd sprout_ui && dart pub get && dart run jaspr_cli:jaspr build
 
 # 2. Copy that payload into this package (drop packages/ and .build.manifest).
 rsync -a --exclude 'packages/' --exclude '.dart_tool/' --exclude '.build.manifest' \
       build/jaspr/ ../sproutd/web/
 
-# 3. Generate lib/src/assets.g.dart from web/ — base64 constants plus a MIME map.
+# 3. Generate lib/src/ui/assets.g.dart from web/ — one base64 constant per file.
 cd ../sproutd && dart run tool/embed_assets.dart
 
 # 4. Revali codegen → .revali/server/server.dart, a plain entrypoint with main().
@@ -30,9 +31,22 @@ dart run revali build
 mkdir -p build && dart compile exe .revali/server/server.dart -o build/sproutd
 ```
 
-Steps 1–3 are **CI-time only**. They exist solely to turn the UI into Dart source that the compiler
-can swallow, because Dart has no `//go:embed` and Revali's `public/` reads files from disk relative
-to the process working directory — which returns HTTP 500 the moment the binary is run from
-anywhere but its source tree. A developer installing sprout never runs any of them, never sees
-`web/`, and receives exactly one file. Only steps 4 and 5 are needed to build the daemon from a
-clean checkout without a UI.
+Steps 1–3 exist solely to turn the UI into Dart source the compiler can swallow, because Dart has
+no `//go:embed` and Revali's `public/` reads files from disk relative to the process working
+directory. The generated handler is `context.response.body = File(p.join('public', <path>))`
+(`revali` 3.3.2, `public_file_maker.dart`) — a *relative* path, resolved against the CWD on every
+request. `ResponseImpl.body=` stats that file and sets **404** when it is missing
+(`revali_router` 5.1.1); `docs/research/05-dart-stack.md` recorded a 500 for the same situation, and
+the two were not reconciled because neither status is one a UI can be served with. Either way a
+`public/` UI works in the worktree and fails everywhere else. A developer installing sprout runs none of these steps, never sees `web/`, and
+receives exactly one file.
+
+**Steps 4 and 5 alone build a working daemon with a working UI**, because `assets.g.dart` is
+committed. That is deliberate and it has a cost: the payload is in git twice, and a rebuilt UI is
+stale until step 3 is re-run. `dart run tool/embed_assets.dart --check` fails on exactly that, and
+`test/ui_test.dart` runs it wherever `web/` exists.
+
+The content type of every asset comes from one table, `lib/src/ui/content_types.dart`, read by the
+generator and by the route. An extension it does not know **fails step 3** rather than defaulting to
+`application/octet-stream`: a browser discards a stylesheet or a script served that way with no
+error anywhere, and the page simply renders blank.

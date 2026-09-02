@@ -32,13 +32,37 @@ const String daemonPortEnvVariable = 'SPROUT_PORT';
 /// The port used when [daemonPortEnvVariable] is unset.
 const int defaultDaemonPort = 8787;
 
-/// The route prefix, set explicitly.
+/// The prefix the JSON API and the socket answer under.
 ///
-/// `AppConfig` defaults `prefix` to `'api'` even when none is passed, so a
-/// route written as `tree` is served at `/api/tree` either way. Naming it here
-/// makes the URL shape a decision rather than a surprise; the research doc's
-/// first 404 was this.
+/// **Written into the controller's own path, not set on the app**, which is a
+/// change P3-03 had to make and not a preference. `AppConfig.prefix` wraps
+/// *every* controller route — the generated server does
+/// `_routes = [Route(prefix, routes: _routes)]` — and only the `public` routes
+/// and the health probes are registered outside it (`revali` 3.3.2,
+/// `lib/server/makers/server_file_maker.dart`). So an app carrying a prefix
+/// has no way to answer at `/`, and the UI has to. `TreeController` therefore
+/// takes [treeControllerPath] and the app takes [daemonAppPrefix].
+///
+/// `AppConfig` defaults `prefix` to `'api'` even when none is passed, which is
+/// the research doc's first 404. Naming both constants here keeps the URL
+/// shape a decision rather than a default.
 const String daemonPrefix = 'api';
+
+/// The path `TreeController` is mounted at: `/api/tree`, unchanged.
+///
+/// The same URLs P1-06 and Phase 2 shipped — `GET /api/tree` and
+/// `ws://…/api/tree/events`. `test/ui_test.dart` asserts them off a real
+/// server, because moving where the prefix is spelled is exactly the kind of
+/// change that is easy to make and easy to get subtly wrong.
+const String treeControllerPath = '$daemonPrefix/tree';
+
+/// The app-level prefix: none.
+///
+/// Empty and not null, because the generated server skips the wrapping only
+/// when the prefix `isNotEmpty` is false, and an empty string reads as a
+/// decision where a null reads as an omission. See [daemonPrefix] for why
+/// there is no prefix here at all.
+const String daemonAppPrefix = '';
 
 /// The environment variable naming the SQLite file the daemon opens.
 ///
@@ -81,12 +105,12 @@ int daemonPortFrom(Map<String, String> environment) {
 /// `const`; the host is fixed and never read from anywhere.
 @App()
 final class MainApp extends AppConfig {
-  /// Binds [daemonHost] on the configured port under [daemonPrefix].
+  /// Binds [daemonHost] on the configured port, with no prefix of its own.
   MainApp()
     : super(
         host: daemonHost,
         port: daemonPortFrom(Platform.environment),
-        prefix: daemonPrefix,
+        prefix: daemonAppPrefix,
       );
 
   @override

@@ -32,6 +32,13 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// `routes/controllers/tree_controller.dart`, `lib/snapshot.dart`,
 /// `lib/watch.dart` and every test reading one set of declarations instead of
 /// two that agree today. See [reExportedWholesale].
+///
+/// `ui` is P3-03's: the UI payload compiled into this binary and the
+/// `content-type` each file in it is served with. It is an area rather than a
+/// corner of an existing library because its bytes are generated —
+/// `lib/src/ui/assets.g.dart`, written by `tool/embed_assets.dart` — and
+/// generated source that nothing names is the hazard `.game_loop/verify.yaml`
+/// opens with.
 const libraries = {
   'store',
   'stream',
@@ -40,6 +47,7 @@ const libraries = {
   'protocol',
   'snapshot',
   'watch',
+  'ui',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

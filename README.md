@@ -8,7 +8,8 @@ from *outside* the sessions.**
 > down to the deepest nested one, and what each is doing right now.
 
 **Status: in development.** Phases 0–2 are built, tested and verified against a compiled binary.
-The UI (Phase 3) is not started. See [Where it actually is](#where-it-actually-is).
+Phase 3 is under way: the UI package builds, and the compiled binary serves it at `/` out of its own
+constants. See [Where it actually is](#where-it-actually-is).
 
 ---
 
@@ -72,7 +73,7 @@ persistence, [Jaspr](https://docs.jaspr.site) for the web UI, compiled to a sing
 | 0 | Ground truth — observed control-plane schemas | ✅ done |
 | 1 | Daemon skeleton — store, stream parser, containment, runner | ✅ done, 135 tests |
 | 2 | Observation — protocol, snapshot, `watch --since`, WebSocket | ✅ done, 242 tests |
-| 3 | The UI — live tree over the socket | ⬜ not started |
+| 3 | The UI — live tree over the socket | 🟡 in progress — payload builds, binary serves it at `/` |
 | 4–7 | Roles, endings, steer | ⬜ not started |
 
 **Phase 0** settled the stream envelope, `parent_tool_use_id` sufficiency, the real hook field

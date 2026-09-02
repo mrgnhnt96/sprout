@@ -64,13 +64,29 @@ void main() {
       expect(daemonHost, app.host);
     });
 
-    test('names its prefix explicitly rather than inheriting api', () {
+    test('carries no prefix of its own, so something can answer at /', () {
       // AppConfig defaults prefix to 'api' when none is passed, so equality
       // alone would pass with the argument deleted. The source check is what
       // makes this a decision rather than the default.
-      expect(MainApp().prefix, 'api');
+      //
+      // It is EMPTY as of P3-03, and that is what the UI at `/` costs.
+      // `AppConfig.prefix` wraps every controller route — the generated server
+      // does `_routes = [Route(prefix, routes: _routes)]` — and only `public`
+      // and the health probes are registered outside it (`revali` 3.3.2,
+      // `server_file_maker.dart`). A prefixed app has no way to answer at the
+      // root at all.
+      expect(MainApp().prefix, isEmpty);
       final source = File('routes/main_app.dart').readAsStringSync();
-      expect(source, contains('prefix: daemonPrefix'));
+      expect(source, contains('prefix: daemonAppPrefix'));
+
+      // The paired half, and the one that matters to a consumer: the API URL
+      // did not move. `test/ui_test.dart` asserts the same thing off a real
+      // socket.
+      expect(treeControllerPath, '$daemonPrefix/tree');
+      expect(
+        File('routes/controllers/tree_controller.dart').readAsStringSync(),
+        contains('@Controller(treeControllerPath)'),
+      );
     });
 
     test('takes the port from SPROUT_PORT and refuses a non-port', () {

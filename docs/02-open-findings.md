@@ -74,6 +74,40 @@ and it is why the remedy has to be detection on the file rather than more parsin
 
 These are true, cost nothing to know, and would cost real time to rediscover.
 
+- **A wildcard route cannot be reached through an empty-path controller in `revali_router` 5.1.1,
+  and neither can a `:param` one.** `@Get('*asset')` under `@Controller('')` generates
+  `Route('', routes: [Route('*asset', …)])`, which is well formed and never matches: `Find` walks
+  into an empty-path parent only when the requested segment *equals the child's own path* —
+  `path == route.path || (route.path.isEmpty && path == proxy?.path)` in
+  `lib/src/router/find.dart` — and `'main.css'` is never equal to `'*asset'` or to `':asset'`.
+  Observed against the compiled binary, not reasoned about: `GET /main.css` returned revali's own
+  `Not Found` body while `GET /` worked. So the UI serves one static route per asset name, and
+  `servedAssetNames` in `routes/controllers/ui_controller.dart` is compared against the embedded
+  payload by `test/ui_test.dart` so the two spellings cannot drift. **Adding a file to the payload
+  means adding a route.** (P3-03)
+- **`MemoryFile` is the wrong body for anything a browser renders.** It is the obvious choice — it
+  carries bytes *and* a mime type — but `MemoryFileBodyData.headers` assigns `filename`, and
+  `HeadersImpl.filename` writes `content-disposition: attachment; filename="…"`
+  (`revali_router` 5.1.1). A page served that way is downloaded rather than rendered, with a 200 in
+  the log. A plain `List<int>` body is a `BinaryBodyData`, which adds no disposition, and
+  `Response.joinedHeaders` merges the body's headers with `headers[key] ??= …` so a `content-type`
+  set on the response wins. This is the same shape as F-03 (`@SSE` shipping
+  `application/octet-stream` with the override ignored): **read the header off the wire.** (P3-03)
+- **`AppConfig.prefix` wraps every controller route, so a prefixed app cannot answer at `/`.** The
+  generated server does `_routes = [Route(prefix, routes: _routes)]` and registers only `public`
+  and the health probes outside it (`revali` 3.3.2, `server_file_maker.dart`). P3-03 therefore
+  moved `api` out of the app and into `@Controller(treeControllerPath)`; the URLs are unchanged.
+  A side effect worth knowing: **revali names the generated route file after the controller path**,
+  so `.revali/server/routes/__tree_route.dart` became `__api_tree_route.dart`, and the drift check
+  in `test/ws_test.dart` that reads it went from asserting to *skipping* until the path was
+  updated. A check that quietly stops running is worse than one nobody wrote. (P3-03)
+- **`sproutd/lib/src/ui/assets.g.dart` is committed, and it can be stale.** It has to be committed:
+  the package imports it, so a checkout without it does not analyze, test or compile. The cost is
+  that the UI payload is in git twice — as base64 here, and as the `sprout_ui` sources it was built
+  from — and that rebuilding the UI without re-running `dart run tool/embed_assets.dart` ships a
+  binary serving the previous UI. `--check` turns that into a failure, but only where `web/` exists,
+  which is after steps 1 and 2 of the pipeline have run; `test/ui_test.dart` skips it with a stated
+  reason otherwise rather than passing in silence. (P3-03)
 - **A non-empty `main.client.dart.js` proves the import graph, not the decoder.** P3-05 gave
   `sprout_ui/lib/app.dart` a real `import 'package:sprout_protocol/protocol.dart'` and an
   exhaustive `switch` over `ProtocolFrame`, and the bundle went from *absent* to 109,503 bytes.

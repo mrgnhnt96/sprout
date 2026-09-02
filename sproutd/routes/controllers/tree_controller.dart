@@ -31,6 +31,8 @@ import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/watch.dart';
 
+import '../main_app.dart';
+
 /// The `type` the opening frame carries.
 ///
 /// [SnapshotFrame.wireType] itself, not a second spelling of it. A snapshot
@@ -131,7 +133,14 @@ final class PingDuration extends Duration {
 
 /// Serves the tree: a snapshot over HTTP, and snapshot-then-watch over a
 /// socket.
-@Controller('tree')
+///
+/// **`api` is part of this path rather than the app's prefix**, and the URLs
+/// are unchanged by that: `GET /api/tree` and `ws://…/api/tree/events`, the
+/// same ones Phase 2 shipped. `AppConfig.prefix` wraps every controller route
+/// and only `public` and the health probes escape it (`revali` 3.3.2,
+/// `server_file_maker.dart`), so an app-level prefix leaves nothing able to
+/// answer at `/` — which P3-03's UI has to. See [daemonPrefix].
+@Controller(treeControllerPath)
 class TreeController {
   /// Takes the store from DI. Constructed once at startup, not per request
   /// (`.revali/server/definitions/__routes.dart` holds one instance).

@@ -697,7 +697,13 @@ void main() {
     // against what `revali build` actually emits. The generated tree is
     // git-ignored, so a clean checkout skips the comparison — and the two
     // assertions that do not need it run either way.
-    final generated = File('.revali/server/routes/__tree_route.dart');
+    // `__api_tree_route.dart` and not `__tree_route.dart`: revali names the
+    // file after the controller's path, and P3-03 moved `api` out of the app
+    // prefix and into `@Controller(treeControllerPath)` so the UI could answer
+    // at `/`. The rename matters here because a path that no longer exists
+    // does not fail this group — it SKIPS it, and a drift check that quietly
+    // stops running is worse than one that was never written.
+    final generated = File('.revali/server/routes/__api_tree_route.dart');
 
     test('the controller asks for a two-way, connect-triggered socket', () {
       final source = File('routes/controllers/tree_controller.dart')

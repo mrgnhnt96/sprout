@@ -1,0 +1,77 @@
+Trunk proof — Phase 3, the live tree, against the COMPILED binary run from /
+sprout HEAD c767a14, 2026-09-02. Binary 8,162,288 bytes, copied out of the repo
+and run with cwd=/ so no CWD-relative read could succeed.
+
+Database seeded earlier by the compiled CLI from the Phase 0 capture
+docs/research/fixtures/phase0/streams/B.ndjson — a root and two subagents.
+
+=== BEFORE (binary at 80563de, Phase 3 not started) ===
+PRE-PHASE-3 consumer verdict: is there a UI at / ?
+  /                      status=404 — no UI served
+  /main.client.dart.js   status=404 — no UI served
+  /api/tree              status=200 type=application/json bytes=1587
+Binary built at 80563de (F-06 landed, no Phase 3). The daemon answers its API and its
+socket; a browser pointed at it gets nothing.
+
+=== AFTER (binary at c767a14) ===
+POST-PHASE-3 consumer verdict: the board, from one snapshot and deltas
+Binary compiled at trunk c767a14, copied to the scratchpad and run with cwd=/,
+its source tree not consulted. Served over a real loopback socket:
+  /                    200  text/html; charset=utf-8          864 B
+  /main.css            200  text/css; charset=utf-8           605 B
+  /main.client.dart.js 200  text/javascript; charset=utf-8    167,848 B
+  /api/tree            200  application/json                  1,641 B
+  no content-disposition on any of them (the MemoryFile trap, avoided)
+
+The served bundle carries the protocol's own string literals, which dart2js keeps
+only for reachable code: snapshot x13, heartbeat x3, journal_unreadable x5,
+'NONE SCHEDULED' x1. A stub that never decodes would not contain them.
+
+The board itself, driven off that live socket:
+
+
+--- after nothing (before the socket said anything) ---
+cursor ?
+ATTACHING · no snapshot yet
+holds nothing
+
+--- after snapshot ---
+cursor s1.d6c1a3baccc97eca.131
+REPLAYING · backlog still arriving
+checkpointed · mtjh5mlh-029452f8 · trunk proof from B.ndjson · since 02:26Z (16h01m) · next NONE SCHEDULED · >=$0.2416 (2 unknown)
+  checkpointed · mtjh5mlh-029452f8/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+    checkpointed · mtjh5mlh-029452f8/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+holds nothing
+
+--- after ready ---
+cursor s1.d6c1a3baccc97eca.131
+LIVE · heartbeat ?
+checkpointed · mtjh5mlh-029452f8 · trunk proof from B.ndjson · since 02:26Z (16h01m) · next NONE SCHEDULED · >=$0.2416 (2 unknown)
+  checkpointed · mtjh5mlh-029452f8/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+    checkpointed · mtjh5mlh-029452f8/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+holds nothing
+
+--- after heartbeat ---
+cursor s1.d6c1a3baccc97eca.131
+LIVE · heartbeat 18:27Z
+checkpointed · mtjh5mlh-029452f8 · trunk proof from B.ndjson · since 02:26Z (16h01m) · next NONE SCHEDULED · >=$0.2416 (2 unknown)
+  checkpointed · mtjh5mlh-029452f8/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+    checkpointed · mtjh5mlh-029452f8/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+holds nothing
+
+=== FINAL BOARD ===
+cursor s1.d6c1a3baccc97eca.131
+LIVE · heartbeat 18:27Z
+checkpointed · mtjh5mlh-029452f8 · trunk proof from B.ndjson · since 02:26Z (16h01m) · next NONE SCHEDULED · >=$0.2416 (2 unknown)
+  checkpointed · mtjh5mlh-029452f8/toolu_013CdYLPDjwGfSwE5gL5Q7BK · Nested subagent chain test · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+    checkpointed · mtjh5mlh-029452f8/toolu_01HLJXeJprJTzcM7oW2Zz1vp · Reply with single word · since 02:26Z (16h01m) · next NONE SCHEDULED · spend ?
+holds nothing
+
+What this proves and what it does not:
+  PROVES  the binary serves the UI with correct content types from its own constants;
+          the bundle contains the protocol strings dart2js keeps only for reachable
+          code; and the client's own FrameReader/LiveTree/App.lines build the board
+          from one snapshot then deltas, showing BOTH subagents nested under the root.
+  DOES NOT PROVE the page paints. There is no browser on this machine. The board above
+          is the same code the bundle compiles from, driven over a real socket with
+          dart:io's WebSocket substituted for the browser's.

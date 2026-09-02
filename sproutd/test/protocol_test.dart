@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:sproutd/protocol.dart';
+import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
 
@@ -15,6 +16,40 @@ SproutEvent anEvent(int seq, {String kind = 'spawned'}) => SproutEvent(
   ts: DateTime.utc(2026, 3, 4, 5, 6, 7),
   kind: kind,
   payload: {'depth': seq, 'note': 'e$seq'},
+);
+
+/// A snapshot with one node, one held resource and a readable feed.
+///
+/// Assembled directly rather than through `takeSnapshot`, because this file
+/// tests the protocol and `takeSnapshot` reads a store. Pure values, as the
+/// library doc promises: nothing here opens a database or asks the clock.
+SproutSnapshot aSnapshot(
+  Cursor cursor, {
+  String? journalUnreadable,
+  SubtreeSpend? spend,
+}) => SproutSnapshot(
+  cursor: cursor,
+  takenAt: DateTime.utc(2026, 3, 4, 5, 6, 7),
+  journalUnreadable: journalUnreadable,
+  nodes: [
+    SnapshotNode(
+      node: SproutNode(
+        id: 'root',
+        project: '/tmp/p',
+        status: NodeStatus.working,
+        role: 'crawler',
+        currentTask: 'building the thing',
+        since: DateTime.utc(2026, 3, 4, 4, 54),
+        nextCheckin: DateTime.utc(2026, 3, 4, 5, 21),
+      ),
+      depth: 0,
+      ownCostUsd: 0.2415507,
+      spend:
+          spend ??
+          const SubtreeSpend(knownMicroUsd: 241551, nodes: 3, unknownNodes: 2),
+    ),
+  ],
+  resources: [HeldResource(name: '/tmp/p', holder: 'root')],
 );
 
 /// Encodes [frame] to one NDJSON line and reads it back.
@@ -210,6 +245,182 @@ void main() {
   });
 
   group('frames', () {
+    test('snapshot round-trips, whole, through the one decoder', () {
+      // F-04: the frame the socket *opens with* is decoded by
+      // `ProtocolFrame.decodeLine` like every other line, and no consumer
+      // branches on `type` before it can start.
+      final frame = SnapshotFrame(snapshot: aSnapshot(instance.cursorAt(9)));
+      final decoded = roundTrip(frame);
+      expect(decoded, isA<SnapshotFrame>());
+      expect(decoded.type, 'snapshot');
+      expect(decoded.cursor, frame.cursor);
+
+      // Whole, not merely present: every field a consumer renders survives.
+      final picture = (decoded as SnapshotFrame).snapshot;
+      expect(picture.takenAt, frame.snapshot.takenAt);
+      expect(picture.takenAt.isUtc, isTrue);
+      expect(picture.journalUnreadable, isNull);
+      expect(picture.resources.single.name, '/tmp/p');
+      expect(picture.resources.single.holder, 'root');
+
+      final node = picture.nodes.single;
+      expect(node.node.id, 'root');
+      expect(node.node.role, 'crawler');
+      expect(node.node.status, NodeStatus.working);
+      expect(node.node.currentTask, 'building the thing');
+      expect(node.node.parentId, isNull);
+      expect(node.node.since, DateTime.utc(2026, 3, 4, 4, 54));
+      expect(node.node.nextCheckin, DateTime.utc(2026, 3, 4, 5, 21));
+      expect(node.depth, 0);
+      expect(node.ownCostUsd, 0.2415507);
+
+      // The spend is rebuilt exactly, `nodes` included. A decoder that had to
+      // guess the size of the subtree would render a floor as if it were a
+      // total, which is the one thing `SubtreeSpend.label` exists to prevent.
+      expect(node.spend.knownMicroUsd, 241551);
+      expect(node.spend.nodes, 3);
+      expect(node.spend.unknownNodes, 2);
+      expect(node.spend.isComplete, isFalse);
+      expect(node.spend.label, frame.snapshot.nodes.single.spend.label);
+
+      // Byte-for-byte, so the encoder and the decoder cannot drift apart.
+      expect(decoded.encodeLine(), frame.encodeLine());
+      // And the same bytes the socket already sends: `type` then the picture.
+      expect((jsonDecode(frame.encodeLine()) as Map)['type'], 'snapshot');
+      expect(jsonDecode(frame.encodeLine()), {
+        'type': 'snapshot',
+        ...frame.snapshot.toJson(),
+      });
+    });
+
+    test('a snapshot with nothing in it round-trips as nothing, not as '
+        'absence', () {
+      // The empty picture and the unreadable one are different facts, and a
+      // decoder that flattened either into the other is INV8 exactly.
+      final cursor = instance.cursorAt(0);
+      final empty = SnapshotFrame(
+        snapshot: SproutSnapshot(
+          cursor: cursor,
+          takenAt: DateTime.utc(2026),
+          nodes: const [],
+          resources: const [],
+        ),
+      );
+      final unreadable = SnapshotFrame(
+        snapshot: SproutSnapshot(
+          cursor: cursor,
+          takenAt: DateTime.utc(2026),
+          nodes: const [],
+          resources: const [],
+          journalUnreadable: 'database is locked',
+        ),
+      );
+      expect((roundTrip(empty) as SnapshotFrame).snapshot.nodes, isEmpty);
+      expect(
+        (roundTrip(empty) as SnapshotFrame).snapshot.isJournalUnreadable,
+        isFalse,
+      );
+      expect(
+        (roundTrip(unreadable) as SnapshotFrame).snapshot.journalUnreadable,
+        'database is locked',
+      );
+      expect(empty.encodeLine(), isNot(unreadable.encodeLine()));
+    });
+
+    test('an unknown subtree spend survives as unknown, never as zero', () {
+      // `spend ?` and `$0.0000` are different answers and the wire has to keep
+      // them apart: an identity element reported as "nothing there" is the
+      // failure `SubtreeSpend` has three states for.
+      final unknown = SnapshotFrame(
+        snapshot: aSnapshot(
+          instance.cursorAt(9),
+          spend: const SubtreeSpend(
+            knownMicroUsd: 0,
+            nodes: 2,
+            unknownNodes: 2,
+          ),
+        ),
+      );
+      final zero = SnapshotFrame(
+        snapshot: aSnapshot(
+          instance.cursorAt(9),
+          spend: const SubtreeSpend(
+            knownMicroUsd: 0,
+            nodes: 2,
+            unknownNodes: 1,
+          ),
+        ),
+      );
+      final decodedUnknown =
+          (roundTrip(unknown) as SnapshotFrame).snapshot.nodes.single.spend;
+      final decodedZero =
+          (roundTrip(zero) as SnapshotFrame).snapshot.nodes.single.spend;
+      expect(decodedUnknown.isUnknown, isTrue);
+      expect(decodedUnknown.costUsd, isNull);
+      expect(decodedUnknown.label, 'spend ?');
+      expect(decodedZero.isUnknown, isFalse);
+      expect(decodedZero.costUsd, 0);
+      expect(decodedZero.label, r'>=$0.0000 (1 unknown)');
+    });
+
+    test('a malformed snapshot is refused, not half-decoded', () {
+      // The picture is the thing every other frame is a delta against, so a
+      // partially-read one is worse than none: the consumer would apply deltas
+      // to a tree that was never on the wire.
+      const good =
+          '{"type":"snapshot","cursor":"s1.0123456789abcdef.9",'
+          '"taken_at":"2026-03-04T05:06:07.000Z","journal_unreadable":null,'
+          '"nodes":[],"resources":[]}';
+      expect(ProtocolFrame.decodeLine(good), isA<SnapshotFrame>());
+      for (final line in [
+        // no cursor, and a cursor that is not one
+        good.replaceFirst('"cursor":"s1.0123456789abcdef.9",', ''),
+        good.replaceFirst('s1.0123456789abcdef.9', 'nonsense'),
+        // no instant, and one that is not an instant
+        good.replaceFirst('"taken_at":"2026-03-04T05:06:07.000Z",', ''),
+        good.replaceFirst('2026-03-04T05:06:07.000Z', 'half past four'),
+        // the two lists
+        good.replaceFirst('"nodes":[],', ''),
+        good.replaceFirst('"resources":[]', '"resources":7'),
+        // A missing `journal_unreadable` would decode as a *readable* feed —
+        // "I could not look" read as "nothing has happened", which is the
+        // confusion the field exists to remove.
+        good.replaceFirst('"journal_unreadable":null,', ''),
+        // a node with a status nothing writes, and one missing its subtree size
+        good.replaceFirst(
+          '"nodes":[]',
+          '"nodes":[{"id":"a","parent_id":null,'
+              '"depth":0,"project":"/p","role":null,"status":"vibing",'
+              '"current_task":null,"since":null,"next_checkin":null,'
+              '"own_cost_usd":null,"subtree_cost_usd":null,'
+              '"subtree_cost_is_complete":false,"subtree_unknown_cost_nodes":1,'
+              '"subtree_nodes":1}]',
+        ),
+        good.replaceFirst(
+          '"nodes":[]',
+          '"nodes":[{"id":"a","parent_id":null,'
+              '"depth":0,"project":"/p","role":null,"status":"working",'
+              '"current_task":null,"since":null,"next_checkin":null,'
+              '"own_cost_usd":null,"subtree_cost_usd":null,'
+              '"subtree_cost_is_complete":false,'
+              '"subtree_unknown_cost_nodes":1}]',
+        ),
+        // a resource with no holder: a lock with no named holder is not
+        // information, and it is refused on the way in as on the way out.
+        good.replaceFirst('"resources":[]', '"resources":[{"name":"/p"}]'),
+        good.replaceFirst(
+          '"resources":[]',
+          '"resources":[{"name":"/p","holder":""}]',
+        ),
+      ]) {
+        expect(
+          () => ProtocolFrame.decodeLine(line),
+          throwsA(isA<ProtocolFormatException>()),
+          reason: line,
+        );
+      }
+    });
+
     test('ready round-trips', () {
       final frame = ReadyFrame(cursor: instance.cursorAt(9));
       final decoded = roundTrip(frame);
@@ -409,21 +620,44 @@ void main() {
         ByeFrame(cursor: cursor, reason: ByeReason.shutdown),
         DeltaFrame(cursor: cursor, events: const []),
         DeltaFrame(cursor: instance.cursorAt(1), events: [anEvent(1)]),
+        // The fifth type. A snapshot is where replay *starts*: the backlog
+        // after it may be thousands of events, and a consumer that went live
+        // on the picture would show a tree it has not caught up to.
+        SnapshotFrame(snapshot: aSnapshot(cursor)),
       ];
       expect(frames.where((f) => f.marksEndOfReplay).map((f) => f.type), [
         'ready',
       ]);
+      // Every frame type this build has is in the list above. If a sixth is
+      // added, this fails and the invariant is re-checked rather than assumed.
+      expect(frames.map((f) => f.type).toSet(), {
+        'ready',
+        'heartbeat',
+        'bye',
+        'delta',
+        'snapshot',
+      });
     });
   });
 
   group('decoding refuses rather than degrades', () {
     test('an unknown frame type throws instead of being dropped', () {
-      expect(
-        () => ProtocolFrame.decodeLine(
-          '{"type":"snapshot","cursor":"s1.0123456789abcdef.9"}',
-        ),
-        throwsA(isA<ProtocolFormatException>()),
-      );
+      // `snapshot` used to be the example here, which is exactly what F-04
+      // was: the frame the socket *opens with* read as unknown. It decodes
+      // now, so the negative needs a type nothing emits — a decoder that
+      // silently accepted anything would pass every positive test in this
+      // file and still show a stale tree without saying why (INV8).
+      for (final line in [
+        '{"type":"nonsense","cursor":"s1.0123456789abcdef.9"}',
+        '{"type":"snapshots","cursor":"s1.0123456789abcdef.9"}',
+        '{"type":"","cursor":"s1.0123456789abcdef.9"}',
+      ]) {
+        expect(
+          () => ProtocolFrame.decodeLine(line),
+          throwsA(isA<ProtocolFormatException>()),
+          reason: line,
+        );
+      }
       // The pair: a type this build does know decodes off the identical shape.
       expect(
         ProtocolFrame.decodeLine(

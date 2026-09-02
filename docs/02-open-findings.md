@@ -15,17 +15,12 @@ are quoted in the entry.
 
 ---
 
-## F-04 — `lib/protocol.dart` has no `SnapshotFrame`
+## Open
 
-**Status:** OPEN · **Found by:** P2-05 · **Fix lives in:** `sproutd/lib/protocol.dart`
-
-The sealed `ProtocolFrame` covers `ready`, `heartbeat`, `bye` and `delta` — but not `snapshot`,
-which is the frame the socket *opens with*. `ProtocolFrame.decodeLine` therefore throws
-`"unknown frame type"` on the very first thing a consumer reads, and every consumer needs one
-special-case branch before it can use a single decoder. Phase 3's client will hit this in its first
-hour.
-
-Adding `SnapshotFrame` belongs in that library, alongside the frames it already owns.
+**None.** Printed rather than left blank, for the same reason `holds nothing` and `NONE SCHEDULED`
+are printed one layer down: a section that vanishes when it is empty cannot be told apart from a
+section somebody forgot to write. F-04 was the last entry and was closed by
+`lib/protocol.dart`'s `SnapshotFrame` — see `git log` for the commit that deleted it.
 
 ---
 

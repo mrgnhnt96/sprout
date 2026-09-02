@@ -31,6 +31,22 @@ final class HeldResource {
   /// This entry as JSON.
   Map<String, Object?> toJson() => {'name': name, 'holder': holder};
 
+  /// Reads back what [toJson] wrote.
+  ///
+  /// Throws [FormatException] on a missing or non-string field, and the
+  /// constructor's own [ArgumentError] still stands behind it: an entry that
+  /// arrives holder-less is refused on the way in exactly as it is refused on
+  /// the way out, because a lock with no named holder is not information
+  /// whichever side of the wire assembled it.
+  factory HeldResource.fromJson(Map<String, Object?> json) {
+    final name = json['name'];
+    final holder = json['holder'];
+    if (name is! String || holder is! String) {
+      throw FormatException('resource needs "name" and "holder"', '$json');
+    }
+    return HeldResource(name: name, holder: holder);
+  }
+
   /// The one-line rendering.
   String get label => 'holds $name · $holder';
 

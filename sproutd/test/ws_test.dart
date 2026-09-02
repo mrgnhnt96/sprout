@@ -58,9 +58,13 @@ void main() {
       // The P1-06 regression, stated as an assertion. A send-only handler that
       // returned one `Map` closed the socket here, and nothing noticed.
       wire = await _serve();
-      final snapshot = jsonDecode(await wire.next()) as Map<String, Object?>;
+      final line = await wire.next();
+      final snapshot = jsonDecode(line) as Map<String, Object?>;
       expect(snapshot['type'], snapshotFrameType);
       expect(snapshot['nodes'], isEmpty);
+      // Over a real socket, not a fake sender: the opening line goes through
+      // the same decoder as every line after it (F-04).
+      expect(ProtocolFrame.decodeLine(line), isA<SnapshotFrame>());
 
       final ready = ProtocolFrame.decodeLine(await wire.next());
       expect(ready, isA<ReadyFrame>());
@@ -613,21 +617,77 @@ void main() {
       expect(node['since'], isNull);
     });
 
-    test('the snapshot frame is not a ProtocolFrame, and the rest are', () {
-      // Paired, because "it decodes" and "it does not" are the two halves of
-      // one finding: `lib/protocol.dart` has no `SnapshotFrame`, so a consumer
-      // needs one branch before it can use one decoder. Named in
-      // `snapshotFrameType`; the fix belongs in that library, not here.
+    test('the decoded picture carries the tree, not just the frame type', () {
+      // The empty-store case above proves the frame decodes; this proves the
+      // *contents* survive the wire, which is what a client actually renders.
+      // A node held, a resource with its holder, and a spend nobody reported.
+      return _withWire(
+        seed: (store) => store.putNode(
+          SproutNode(
+            id: 'a',
+            project: '/p',
+            role: 'crawler',
+            status: NodeStatus.working,
+            currentTask: 'building the thing',
+            since: DateTime.utc(2026, 3, 4, 4, 54),
+          ),
+        ),
+        (wire) async {
+          await _until(() => wire.received.isNotEmpty);
+          final frame =
+              ProtocolFrame.decodeLine(wire.received.first) as SnapshotFrame;
+          final node = frame.snapshot.nodes.single;
+          expect(node.node.id, 'a');
+          expect(node.node.role, 'crawler');
+          expect(node.node.status, NodeStatus.working);
+          expect(node.node.currentTask, 'building the thing');
+          expect(node.node.since, DateTime.utc(2026, 3, 4, 4, 54));
+          expect(node.node.nextCheckin, isNull);
+          // Nobody reported dollars, and that stays `spend ?` rather than
+          // becoming `\$0.0000` on the way through the decoder.
+          expect(node.spend.isUnknown, isTrue);
+          expect(node.spend.label, 'spend ?');
+          expect(node.spend.nodes, 1);
+          // A working node holds its project directory, with its holder.
+          expect(frame.snapshot.resources.single.name, '/p');
+          expect(frame.snapshot.resources.single.holder, 'a');
+          expect(frame.snapshot.isJournalUnreadable, isFalse);
+          // And the picture re-encodes to the bytes it arrived as.
+          expect(frame.encodeLine(), wire.received.first);
+        },
+      );
+    });
+
+    test('every line this socket sends is a ProtocolFrame, the first '
+        'included', () {
+      // F-04, stated as the assertion that closes it: one decoder for the
+      // whole stream, with no branch on `type` before it can start. The first
+      // line is the picture, and it decodes into the `SproutSnapshot`
+      // `lib/snapshot.dart` owns rather than a map the consumer must pick
+      // apart itself.
       return _withWire((wire) async {
         wire.heartbeats.add(null);
         await _until(() => wire.received.length >= 3);
-        expect(
-          () => ProtocolFrame.decodeLine(wire.received.first),
-          throwsA(isA<ProtocolFormatException>()),
-        );
+        final opening = ProtocolFrame.decodeLine(wire.received.first);
+        expect(opening, isA<SnapshotFrame>());
+        expect((opening as SnapshotFrame).snapshot.nodes, isEmpty);
+        // The picture's cursor is the frame's, so the deltas that follow
+        // resume from where it was taken.
+        expect(opening.cursor, opening.snapshot.cursor);
+        // ...and it is emphatically not the end of replay: the `ready` after
+        // it is.
+        expect(opening.marksEndOfReplay, isFalse);
         for (final line in wire.received.skip(1)) {
           expect(() => ProtocolFrame.decodeLine(line), returnsNormally);
         }
+        // The paired negative: a decoder that took anything would pass the
+        // loop above without discriminating (INV8).
+        expect(
+          () => ProtocolFrame.decodeLine(
+            '{"type":"nonsense","cursor":"s1.0123456789abcdef.9"}',
+          ),
+          throwsA(isA<ProtocolFormatException>()),
+        );
       });
     });
   });
@@ -829,8 +889,9 @@ Future<void> _withBound(
 Future<void> _withWire(
   Future<void> Function(_Wire wire) body, {
   Duration? ping = _testPing,
+  void Function(SproutStore store)? seed,
 }) async {
-  final wire = await _serve(ping: ping);
+  final wire = await _serve(ping: ping, seed: seed);
   try {
     await body(wire);
   } finally {

@@ -1,6 +1,5 @@
-import '../../protocol.dart';
-
 import '../../store.dart';
+import '../protocol/cursor.dart';
 import 'resource.dart';
 import 'spend.dart';
 
@@ -54,7 +53,50 @@ final class SnapshotNode {
     'subtree_cost_usd': spend.costUsd,
     'subtree_cost_is_complete': spend.isComplete,
     'subtree_unknown_cost_nodes': spend.unknownNodes,
+    'subtree_nodes': spend.nodes,
   };
+
+  /// Reads back what [toJson] wrote.
+  ///
+  /// Exact, not approximate: [SubtreeSpend] is rebuilt from the four keys
+  /// above and nothing is inferred. `subtree_nodes` exists for this reason —
+  /// without it the size of the subtree would have to be guessed, and a
+  /// guessed count is indistinguishable downstream from a counted one, which
+  /// is the failure `spend ?` exists to prevent.
+  ///
+  /// Throws [FormatException] on anything it cannot read, rather than filling
+  /// a field in. A node decoded with a defaulted status or a defaulted depth
+  /// is a picture that says something sprout never said.
+  factory SnapshotNode.fromJson(Map<String, Object?> json) {
+    final unknownNodes = _intOf(json, 'subtree_unknown_cost_nodes');
+    final costUsd = _doubleOrNullOf(json, 'subtree_cost_usd');
+    final status = _stringOf(json, 'status');
+    final NodeStatus parsed;
+    try {
+      parsed = NodeStatus.fromWire(status);
+    } on ArgumentError {
+      throw FormatException('snapshot node "status" is not a status', status);
+    }
+    return SnapshotNode(
+      node: SproutNode(
+        id: _stringOf(json, 'id'),
+        parentId: _stringOrNullOf(json, 'parent_id'),
+        project: _stringOf(json, 'project'),
+        role: _stringOrNullOf(json, 'role'),
+        status: parsed,
+        currentTask: _stringOrNullOf(json, 'current_task'),
+        since: _instantOrNullOf(json, 'since'),
+        nextCheckin: _instantOrNullOf(json, 'next_checkin'),
+      ),
+      depth: _intOf(json, 'depth'),
+      ownCostUsd: _doubleOrNullOf(json, 'own_cost_usd'),
+      spend: SubtreeSpend(
+        knownMicroUsd: costUsd == null ? 0 : (costUsd * 1e6).round(),
+        nodes: _intOf(json, 'subtree_nodes'),
+        unknownNodes: unknownNodes,
+      ),
+    );
+  }
 
   /// The one line this node prints, indented by [depth].
   ///
@@ -147,6 +189,49 @@ final class SproutSnapshot {
     'resources': [for (final resource in resources) resource.toJson()],
   };
 
+  /// Reads back what [toJson] wrote.
+  ///
+  /// This is the decoder `SnapshotFrame` uses, and it lives here rather than
+  /// in `lib/protocol.dart` on purpose: the shape a snapshot has on the wire
+  /// is written by [toJson] four lines up, and a reader of that shape kept in
+  /// another library is a second description of one thing that must stay
+  /// equal to the first.
+  ///
+  /// Throws [FormatException] rather than returning a partial picture. The
+  /// protocol wraps that in its own `ProtocolFormatException`; nothing here
+  /// depends on the protocol beyond [Cursor].
+  factory SproutSnapshot.fromJson(Map<String, Object?> json) {
+    final encoded = _stringOf(json, 'cursor');
+    final cursor = Cursor.tryParse(encoded);
+    if (cursor == null) {
+      throw FormatException('snapshot "cursor" is not a cursor', encoded);
+    }
+    final nodes = json['nodes'];
+    if (nodes is! List) {
+      throw const FormatException('snapshot has no "nodes"');
+    }
+    final resources = json['resources'];
+    if (resources is! List) {
+      throw const FormatException('snapshot has no "resources"');
+    }
+    // `journal_unreadable` must be *present*, not merely non-null: a picture
+    // that dropped the key would decode as one taken over a readable feed,
+    // which is the exact confusion the field exists to remove (INV8).
+    if (!json.containsKey(journalUnreadableKey)) {
+      throw const FormatException('snapshot has no "$journalUnreadableKey"');
+    }
+    return SproutSnapshot(
+      cursor: cursor,
+      takenAt: _instantOf(json, 'taken_at'),
+      nodes: [for (final node in nodes) SnapshotNode.fromJson(_objectOf(node))],
+      resources: [
+        for (final resource in resources)
+          HeldResource.fromJson(_objectOf(resource)),
+      ],
+      journalUnreadable: _stringOrNullOf(json, journalUnreadableKey),
+    );
+  }
+
   /// The human rendering: the cursor, one line per node, then the two fields
   /// that must survive even when there is nothing to say about them.
   ///
@@ -211,4 +296,67 @@ String formatAge(Duration age) {
     return '${age.inHours}h${(age.inMinutes % 60).toString().padLeft(2, '0')}m';
   }
   return '${age.inDays}d${(age.inHours % 24).toString().padLeft(2, '0')}h';
+}
+
+/// Reads a required object out of a decoded JSON value.
+///
+/// The `fromJson` helpers below all throw rather than substitute. A snapshot
+/// is a *picture*, and a picture with a field quietly filled in is worse than
+/// no picture: the consumer cannot tell which parts sprout observed.
+Map<String, Object?> _objectOf(Object? value) {
+  if (value is! Map) {
+    throw FormatException('expected a JSON object', '$value');
+  }
+  return {for (final entry in value.entries) '${entry.key}': entry.value};
+}
+
+String _stringOf(Map<String, Object?> json, String key) {
+  final value = json[key];
+  if (value is! String) {
+    throw FormatException('snapshot "$key" is not a string', '$value');
+  }
+  return value;
+}
+
+String? _stringOrNullOf(Map<String, Object?> json, String key) {
+  final value = json[key];
+  if (value == null) return null;
+  if (value is! String) {
+    throw FormatException('snapshot "$key" is not a string', '$value');
+  }
+  return value;
+}
+
+int _intOf(Map<String, Object?> json, String key) {
+  final value = json[key];
+  if (value is! int) {
+    throw FormatException('snapshot "$key" is not an integer', '$value');
+  }
+  return value;
+}
+
+double? _doubleOrNullOf(Map<String, Object?> json, String key) {
+  final value = json[key];
+  if (value == null) return null;
+  if (value is! num) {
+    throw FormatException('snapshot "$key" is not a number', '$value');
+  }
+  return value.toDouble();
+}
+
+DateTime _instantOf(Map<String, Object?> json, String key) {
+  return _parseInstant(key, _stringOf(json, key));
+}
+
+DateTime? _instantOrNullOf(Map<String, Object?> json, String key) {
+  final value = _stringOrNullOf(json, key);
+  return value == null ? null : _parseInstant(key, value);
+}
+
+DateTime _parseInstant(String key, String value) {
+  try {
+    return DateTime.parse(value).toUtc();
+  } on FormatException {
+    throw FormatException('snapshot "$key" is not an instant', value);
+  }
 }

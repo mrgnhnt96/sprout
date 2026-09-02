@@ -33,19 +33,12 @@ import 'package:sproutd/watch.dart';
 
 /// The `type` the opening frame carries.
 ///
-/// A snapshot is not a [ProtocolFrame]: `lib/protocol.dart` has `ready`,
-/// `heartbeat`, `bye` and `delta` and no `snapshot`, so
-/// `ProtocolFrame.fromJson` **throws `unknown frame type`** on this one. A
-/// consumer of this socket therefore branches on `type == snapshotFrameType`
-/// first and decodes everything else with `ProtocolFrame.decodeLine`.
-///
-/// That split is a real seam and it is named here rather than smoothed over:
-/// adding a `SnapshotFrame` to `lib/protocol.dart` would let a consumer use
-/// one decoder for the whole stream, and it belongs in that library rather
-/// than in a controller. See `test/ws_test.dart`, which asserts both halves —
-/// that every other frame this socket sends round-trips through
-/// `ProtocolFrame.decodeLine`, and that this one does not.
-const String snapshotFrameType = 'snapshot';
+/// [SnapshotFrame.wireType] itself, not a second spelling of it. A snapshot
+/// **is** a [ProtocolFrame] as of F-04, so a consumer decodes this line with
+/// `ProtocolFrame.decodeLine` exactly like every other one and never branches
+/// on the type before it can start. See `test/ws_test.dart`, which asserts
+/// that every line this socket sends — the first included — round-trips.
+const String snapshotFrameType = SnapshotFrame.wireType;
 
 /// The close reason used when the stream said everything it had to say.
 ///
@@ -237,16 +230,18 @@ SproutInstance daemonInstanceFor(SproutStore store) => SproutInstance.forFeed(
   firstEvent: store.firstEvent,
 );
 
-/// The opening frame: a whole snapshot, tagged so a consumer can tell it from
-/// the [ProtocolFrame]s that follow.
-Map<String, Object?> snapshotFrameJson(SproutSnapshot snapshot) => {
-  'type': snapshotFrameType,
-  ...snapshot.toJson(),
-};
+/// The opening frame: a whole snapshot, as the [ProtocolFrame] that carries
+/// one.
+///
+/// The encoding is [SnapshotFrame.toJson] and this function does not add to
+/// it. A controller that assembled the same object a second way would be two
+/// descriptions of one frame that must stay equal — which is what F-01 was.
+Map<String, Object?> snapshotFrameJson(SproutSnapshot snapshot) =>
+    SnapshotFrame(snapshot: snapshot).toJson();
 
 /// The socket's frames: a `snapshot`, then `watch --since` in full.
 ///
-/// In order: one [snapshotFrameJson], then the replay of everything after
+/// In order: one [SnapshotFrame], then the replay of everything after
 /// [since], one `ready`, then live `delta`s, a `heartbeat` on a fixed interval
 /// whether or not the tree is busy, and a `bye` with a reason. Every one of
 /// those exists because a producer that has stopped working and a quiet one

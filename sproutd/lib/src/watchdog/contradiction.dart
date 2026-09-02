@@ -92,11 +92,15 @@ final class Contradiction {
 ///   named in the sweep record and in its `why`, and `SweepRecord` offers no
 ///   `healthy` getter for a caller to read the silence as one.
 ///
-/// **This disagrees with `Liveness.pages`, on purpose.** P6-01 shipped
-/// `Liveness.pages` returning true for [Liveness.unmeasured]. Nothing consumed
-/// it; this is the first consumer, and it does not use it. Recorded as F-13 in
-/// `docs/02-open-findings.md` so the disagreement is visible rather than
-/// silent.
+/// **This is a narrower question than `Liveness.worthSurfacing`, and the two
+/// are now named for the questions they answer.** That getter — P6-01's, which
+/// this leaf did not use — returns true for [Liveness.unmeasured] as well,
+/// because *"I could not tell"* about a node sprout believes is running does
+/// belong in front of a human. It is simply not a stall alarm. The two looked
+/// like one question while one was called `pages`, which was finding F-13;
+/// P6-03 settled it by renaming that one rather than narrowing it, and the
+/// board consumes both — contradictions in a `watchdog` frame's `stalled`,
+/// blindness in its `blind`, never merged.
 final class Blindness {
   /// Wraps an [Liveness.unmeasured] verdict.
   Blindness(this.verdict)

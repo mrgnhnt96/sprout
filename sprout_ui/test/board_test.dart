@@ -9,6 +9,8 @@
 /// in, and it is empty.
 library;
 
+import 'dart:io';
+
 import 'package:sprout_protocol/protocol.dart';
 import 'package:sprout_protocol/snapshot.dart';
 import 'package:sprout_protocol/values.dart';
@@ -283,10 +285,16 @@ void main() {
   group('the board is a board', () {
     test('one line per node, and the whole board fits a phone', () {
       // `docs/01-plan.md` §8, applied at tree scope: one line per node, no
-      // prose. The count is exact — a header, a liveness line, the nodes, the
-      // stranger and the held-resources line.
+      // prose. The count is exact — a header, a liveness line, the watchdog
+      // line, the nodes, the stranger and the held-resources line.
+      //
+      // The watchdog line is unconditional and there is no sweep in this
+      // capture, so it reads `no sweep yet`. That is the point of counting it:
+      // a board that printed nothing when the daemon had not swept would be
+      // indistinguishable from one whose watchdog says the tree is fine.
       final lines = App.lines(settled);
-      expect(lines, hasLength(2 + settled.nodes.length + 1 + 1));
+      expect(lines, hasLength(3 + settled.nodes.length + 1 + 1));
+      expect(lines[2], 'WATCHDOG · $noSweepYetText');
       for (final line in lines) {
         expect(line.split('\n'), hasLength(1), reason: 'no multi-line rows');
       }
@@ -417,7 +425,7 @@ void main() {
     test('three nodes, depth 0, 1 and 2, in depth-first order', () {
       expect(tree.nodes.map((n) => n.depth), [0, 1, 2]);
       expect(tree.strangers, isEmpty);
-      expect(App.lines(tree), hasLength(2 + 3 + 1));
+      expect(App.lines(tree), hasLength(3 + 3 + 1));
     });
 
     test('the root reports its own dollars and a partial subtree', () {
@@ -428,6 +436,207 @@ void main() {
       expect(root.spend.isComplete, isFalse);
       expect(root.spend.label, '>=\$0.2416 (2 unknown)');
       expect(tree.nodes[1].spend.label, 'spend ?');
+    });
+  });
+
+  group('the watchdog on the board', () {
+    // P6-03. A `watchdog` frame is a LEVEL, not an event: it carries the whole
+    // current verdict every sweep, which is the only way a board can show a
+    // node **stop** being stalled without anything writing a status row.
+    // `NodeStatus` has no `stalled` member for exactly that reason.
+    final base = replay(WireFixture.read('settled_wire').frames()).last;
+    final rootId = base.nodes.first.node.id;
+
+    WatchdogFrame sweep({
+      List<StalledNode> stalled = const [],
+      List<UnmeasuredNode> blind = const [],
+      String? failure,
+      String why = 'no ring: the 3 node(s) that could be measured were live',
+      int at = 46,
+    }) => WatchdogFrame(
+      cursor: base.cursor!,
+      sweptAt: DateTime.utc(2026, 9, 2, 21, at),
+      why: why,
+      nodesSwept: 3,
+      stalled: stalled,
+      blind: blind,
+      failure: failure,
+    );
+
+    StalledNode stall({int rings = 1, bool silenced = false}) => StalledNode(
+      nodeId: rootId,
+      liveness: 'stalled',
+      because:
+          'pid 33134 is alive and started at 2026-09-02 21:45:48.000Z; '
+          'the transcript last grew 3s ago (threshold 2s ago)',
+      consecutiveRings: rings,
+      silenced: silenced,
+    );
+
+    test('before any sweep the board says so, and never says ok', () {
+      expect(App.watchdog(base), 'WATCHDOG · $noSweepYetText');
+      expect(base.lastSweep, isNull);
+      expect(base.stalled, isEmpty);
+      // INV8: "the watchdog has not run" and "the tree is fine" must not read
+      // the same, so there is no green line for either.
+      expect(App.lines(base).join('\n').toLowerCase(), isNot(contains('ok')));
+    });
+
+    test('a stall arrives, and the node is visibly stalled', () {
+      final stalled = base.apply(sweep(stalled: [stall()]));
+      expect(stalled.stallOf(rootId), isNotNull);
+      expect(App.lines(stalled), contains(App.stallLine(stall())));
+      expect(
+        App.lines(stalled).firstWhere((l) => l.startsWith('STALLED')),
+        allOf(contains(rootId), contains('33134'), contains('ring 1')),
+      );
+      // Alongside the node, not inside it: the stored status is untouched, and
+      // that is what makes recovery possible without a write.
+      expect(stalled.nodes.first.node.status, base.nodes.first.node.status);
+      expect(stalled.nodes.first.node.status.wire, isNot('stalled'));
+    });
+
+    test('and then it stops being stalled, with nothing written', () {
+      final stalled = base.apply(sweep(stalled: [stall()]));
+      final recovered = stalled.apply(sweep(at: 47));
+      expect(recovered.stallOf(rootId), isNull);
+      expect(recovered.stalled, isEmpty);
+      expect(
+        App.lines(recovered).where((l) => l.startsWith('STALLED')),
+        isEmpty,
+      );
+      // The node line itself is byte-identical to before the stall: nothing
+      // about the node changed, only what the watchdog concluded about it.
+      expect(
+        App.lines(recovered).where((l) => l.contains(rootId)),
+        App.lines(base).where((l) => l.contains(rootId)),
+      );
+    });
+
+    test(
+      'a silenced node is still shown as stalled, and says it is capped',
+      () {
+        final capped = base.apply(
+          sweep(stalled: [stall(rings: 3, silenced: true)]),
+        );
+        expect(capped.stallOf(rootId), isNotNull);
+        final line = App.lines(capped)
+            .firstWhere((l) => l.startsWith('STALLED'));
+        expect(line, contains('ring cap'));
+        expect(line, contains('still stalled'));
+      },
+    );
+
+    test('a sweep that could not look is NOT a recovery', () {
+      // The failure this whole phase exists to prevent, in one assertion: a
+      // watchdog that could not see must never read as a watchdog that saw
+      // nothing wrong. The stall stays on the board and the line says why.
+      final stalled = base.apply(sweep(stalled: [stall()]));
+      final blindSweep = stalled.apply(
+        sweep(
+          at: 47,
+          failure: 'ps: command not found',
+          why: 'no sweep was taken: the measurement threw',
+          stalled: const [],
+        ),
+      );
+      expect(blindSweep.stallOf(rootId), isNotNull, reason: 'still stalled');
+      expect(App.watchdog(blindSweep), startsWith('WATCHDOG COULD NOT LOOK'));
+      expect(App.watchdog(blindSweep), contains('ps: command not found'));
+    });
+
+    test('a blind sweep names the node and calls it neither', () {
+      final blindSweep = base.apply(
+        sweep(
+          blind: [
+            UnmeasuredNode(nodeId: rootId, because: 'could not look at pid 1'),
+          ],
+          why:
+              'no ring: not one of the 3 node(s) could be measured, so this '
+              'sweep establishes nothing about any of them',
+        ),
+      );
+      expect(blindSweep.stalled, isEmpty);
+      expect(blindSweep.unmeasuredOf(rootId), isNotNull);
+      final line = App.lines(blindSweep)
+          .firstWhere((l) => l.startsWith('UNMEASURED'));
+      expect(line, contains('NOT'));
+      expect(App.watchdog(blindSweep), contains('establishes nothing'));
+    });
+
+    test('the board prints the sweep own sentence, not a summary of it', () {
+      // One derivation: the same string the daemon appended to its NDJSON
+      // journal. A board that paraphrased could drift into "all good".
+      final why =
+          'no ring: 1 node(s) advanced, so their ring counts reset (n1)';
+      expect(App.watchdog(base.apply(sweep(why: why))), endsWith(why));
+    });
+
+    test('a stalled node this client has never seen is still shown', () {
+      final ghost = base.apply(
+        sweep(
+          stalled: [
+            const StalledNode(
+              nodeId: 'never-described',
+              liveness: 'abandoned',
+              because: 'no live process and no ending recorded',
+              consecutiveRings: 2,
+              silenced: false,
+            ),
+          ],
+        ),
+      );
+      expect(
+        App.lines(ghost).where((l) => l.contains('never-described')),
+        hasLength(1),
+      );
+    });
+
+    test('a sweep moves nothing about the tree or the feed', () {
+      final after = base.apply(sweep(stalled: [stall()]));
+      expect(after.nodes, base.nodes);
+      expect(after.cursor!.encode(), base.cursor!.encode());
+      expect(after.asOf, base.asOf);
+      expect(after.events, base.events);
+      expect(after.replayComplete, base.replayComplete);
+      expect(after.lastHeartbeat, base.lastHeartbeat);
+    });
+
+    test('nothing in sprout_ui can act on a node', () {
+      // The third copy of the guard P6-01 and P6-02 each carry for their own
+      // directory. This package is the one a person clicks, so "clean up the
+      // stalled node" would land here as a button — and a button needs a
+      // handler and a request, so both are what this looks for. §5: the real
+      // incident behind that rule held four uncommitted files and a green test
+      // suite.
+      // Comments are stripped first. The words below are exactly the words
+      // this package's prose uses to explain why none of them is here — the
+      // note on `TreeSocket` says the daemon's ping "reclaims a peer" — so a
+      // guard reading raw text would fail on its own justification and be
+      // weakened to get green.
+      String code(File file) => file
+          .readAsLinesSync()
+          .where((line) => !line.trimLeft().startsWith('//'))
+          .join('\n');
+      final offenders = Directory('lib')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart'))
+          .where(
+            (f) => RegExp(
+              r'\bbutton\(|onClick|addEventListener|HttpRequest|\bfetch\('
+              r'|kill|terminate|reclaim',
+            ).hasMatch(code(f)),
+          )
+          .map((f) => f.path)
+          .toList();
+      expect(
+        offenders,
+        isEmpty,
+        reason:
+            'the board surfaces and pages. Acting on a stalled node belongs '
+            'to a human, and to nothing on this page.',
+      );
     });
   });
 

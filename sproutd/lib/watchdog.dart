@@ -1,8 +1,10 @@
 /// The watchdog loop — contradiction-triggered, capped, and it never acts.
 ///
 /// P6-01 built the measurement; this is the thing that runs it on a schedule,
-/// decides when a verdict is worth a human's attention, and rings. Showing the
-/// ring on a board is P6-03's.
+/// decides when a verdict is worth a human's attention, and rings. P6-03 wired
+/// it into `sprout ui` and put the result on the board — see [WatchdogBoard]
+/// and [watchdogFrameFor], and `bin/sprout.dart`'s `UiCommand` for the
+/// lifecycle.
 ///
 /// Start at [Watchdog.sweepOnce], which is one iteration of [Watchdog.run] and
 /// is the whole of the decision:
@@ -60,9 +62,10 @@
 /// record to contradict; and a sweep that could not see half the tree
 /// reporting "nothing to ring" is the blind watchdog reporting green. So blind
 /// nodes are named in [SweepRecord.blind] and in the `why`, and there is no
-/// `healthy` getter anywhere for a caller to read the silence as one. This
-/// disagrees with P6-01's `Liveness.pages`, deliberately and on the record —
-/// see [Blindness] and F-13 in `docs/02-open-findings.md`.
+/// `healthy` getter anywhere for a caller to read the silence as one. That is
+/// a narrower question than `Liveness.worthSurfacing`, which is true for
+/// [Liveness.unmeasured] too — the two are different questions and are now
+/// named for them, which is how P6-03 settled F-13. See [Blindness].
 ///
 /// ## And it never acts
 ///
@@ -78,6 +81,8 @@
 /// and §11.
 library;
 
+export 'src/watchdog/board.dart'
+    show WatchdogBoard, watchdogFrameFor, watchdogStoppedRecord;
 export 'src/watchdog/bell.dart'
     show FanOutBell, RecordingBell, WatchdogBell, WritingBell;
 export 'src/watchdog/contradiction.dart'

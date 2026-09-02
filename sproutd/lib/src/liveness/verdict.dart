@@ -68,12 +68,31 @@ enum Liveness {
   /// [unmeasured].
   bool get isVerdict => this == live || this == stalled || this == abandoned;
 
-  /// Whether a watchdog should surface this to a human.
+  /// Whether a human should be shown this at all.
   ///
-  /// [unmeasured] pages too: "I could not tell" about a node sprout believes
-  /// is running is a fact worth a human's attention, and treating it as quiet
-  /// is how a blind watchdog reports green.
-  bool get pages => this == stalled || this == abandoned || this == unmeasured;
+  /// **Renamed from `pages` by P6-03, settling F-13, and the rename is the
+  /// whole fix.** P6-01 shipped this as `pages` returning true for
+  /// [unmeasured], arguing that *"'I could not tell' about a node sprout
+  /// believes is running is a fact worth a human's attention, and treating it
+  /// as quiet is how a blind watchdog reports green."* P6-02's `ringingVerdicts`
+  /// then excluded [unmeasured], because the watchdog rings on a
+  /// *contradiction* and the absence of an observation contradicts nothing.
+  ///
+  /// Both were right, about **different questions**, and the bug was that two
+  /// declarations answering different questions were named as though they
+  /// answered one. `ringingVerdicts` means *rings a stall alarm*; this means
+  /// *belongs on the board*. Narrowing this one to match would have thrown
+  /// away P6-01's argument, which is correct — so the name moved instead and
+  /// the set did not.
+  ///
+  /// The board honours it: a `watchdog` frame carries the contradictions in
+  /// `stalled` and the blind nodes in `blind`, which together are exactly the
+  /// verdicts this returns true for, and `test/watchdog_test.dart` pins that
+  /// correspondence. The two lists stay separate on the wire precisely because
+  /// they are not the same fact — one is what was seen, the other is what was
+  /// not.
+  bool get worthSurfacing =>
+      this == stalled || this == abandoned || this == unmeasured;
 }
 
 /// One node's liveness, with everything the conclusion was drawn from.

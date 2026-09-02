@@ -28,6 +28,7 @@ import 'dart:io';
 import 'package:revali_router/revali_router.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/ui.dart';
+import 'package:sproutd/watchdog.dart';
 import 'package:test/test.dart';
 
 import '../routes/controllers/tree_controller.dart';
@@ -301,7 +302,7 @@ Future<String> _read(ResponseImpl response) async =>
 Future<_Bound> _bind() async {
   const controller = UiController();
   final store = SproutStore.memory();
-  final tree = TreeController(store);
+  final tree = TreeController(store, WatchdogBoard());
 
   final router = Router(
     routes: [

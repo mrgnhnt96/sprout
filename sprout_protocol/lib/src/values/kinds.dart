@@ -37,10 +37,21 @@
 /// holds. `sproutd/test/protocol_test.dart` pins the literal text for that
 /// reason; changing it there is meant to be a deliberate act.
 ///
+/// The `hook.*` kinds arrived for P8-01 and are the same argument reaching the
+/// second observation path. sprout can only parse the stream of a process it
+/// launched; a machine-wide hook config is the only way it sees the session a
+/// developer starts by hand. Those payloads fold into the same feed, the
+/// browser branches on their `kind` too, and so the vocabulary belongs here
+/// with the rest — declared once, before the first producer exists, rather
+/// than as literals at whatever call site writes them first. That is what
+/// F-11 and F-12 each cost a leaf to undo.
+///
 /// (The Phase 0 captures under `docs/research/fixtures/` do *not* contain
-/// these strings — they are raw Claude Code stream JSON, whose kinds are
-/// `assistant`, `user`, `result` and so on. sprout's own vocabulary is
-/// written by `SproutStore`, not replayed from those files.)
+/// these strings — the stream captures are raw Claude Code stream JSON, whose
+/// kinds are `assistant`, `user`, `result` and so on, and the hook captures
+/// carry a bare `hook_event_name` such as `SessionStart` with no prefix on it.
+/// sprout's own vocabulary is written by `SproutStore`, not replayed from
+/// those files.)
 library;
 
 import 'event.dart';
@@ -132,3 +143,138 @@ const String runnerSessionKind = 'runner.session';
 /// the stream said; whether the run ended honestly is the node's status, and
 /// the two are separate on purpose.
 const String runnerExitedKind = 'runner.exited';
+
+/// The prefix on every kind that records what a **hook** delivered.
+///
+/// Deliberately parallel to `frame.`, and deliberately not the same as it. The
+/// two observation paths of `docs/01-plan.md` §4 are different sources of truth
+/// about the same session: the stream path only ever sees a session sprout
+/// launched and owns the pipe for, while a machine-wide hook config is the only
+/// way a session a developer started by hand is visible at all. A reader of the
+/// feed has to be able to tell which path a row came from, because what the two
+/// can be trusted for differs — so they do not share a prefix.
+const String hookKindPrefix = 'hook.';
+
+/// The kind for a `SessionStart` hook payload.
+///
+/// **The wire's own spelling, verbatim, after the prefix.** Not
+/// `hook.session_start`: a case mapping between what Claude Code sends and what
+/// sprout stores is a second derivation that can drift from the first, and it
+/// cannot be checked by reading one line. `frame.assistant` and
+/// `frame.system.init` already carry the wire's spelling for the same reason —
+/// those happen to be lower case because the stream's `type` values are, and
+/// hook event names are `PascalCase` because the hook API's are. The rule is
+/// the same rule; only the source alphabet differs.
+///
+/// Everything [nodeObservedKind]'s doc says about renaming applies here in
+/// full: these strings go in an append-only `kind` column with no rewrite path.
+const String hookSessionStartKind = '${hookKindPrefix}SessionStart';
+
+/// The kind for a `SessionEnd` hook payload.
+const String hookSessionEndKind = '${hookKindPrefix}SessionEnd';
+
+/// The kind for a `UserPromptSubmit` hook payload.
+///
+/// **Not proof a human typed anything.** A background node's result is
+/// delivered to the root as a fresh `UserPromptSubmit` whose `prompt` is a
+/// `<task-notification>` block, byte-for-byte the shape of a person starting a
+/// new task. Telling the two apart is a property of the payload, not of the
+/// kind.
+const String hookUserPromptSubmitKind = '${hookKindPrefix}UserPromptSubmit';
+
+/// The kind for a `PreToolUse` hook payload.
+const String hookPreToolUseKind = '${hookKindPrefix}PreToolUse';
+
+/// The kind for a `PostToolUse` hook payload.
+///
+/// **The kind the hook-path tree is built from.** A `PostToolUse` of the spawn
+/// tool is the only record that carries the caller's `agent_id` and the
+/// callee's `tool_response.agentId` together, and `agent_id` is the only
+/// identifier that distinguishes nodes on this path at all — every node in a
+/// tree shares one `session_id`.
+const String hookPostToolUseKind = '${hookKindPrefix}PostToolUse';
+
+/// The kind for a `SubagentStart` hook payload.
+const String hookSubagentStartKind = '${hookKindPrefix}SubagentStart';
+
+/// The kind for a `SubagentStop` hook payload.
+///
+/// The only event observed to carry `agent_transcript_path`, which is the
+/// subagent's *own* transcript. Every other payload's `transcript_path` is the
+/// root session's, even inside a subagent.
+const String hookSubagentStopKind = '${hookKindPrefix}SubagentStop';
+
+/// The kind for a `Stop` hook payload.
+const String hookStopKind = '${hookKindPrefix}Stop';
+
+/// The kind for a `Notification` hook payload.
+///
+/// Registered in the Phase 0 probes and **never fired**, so no payload of it
+/// has ever been seen. It has a kind anyway, because a name that is known and
+/// unfired is a different thing from a name that is unknown, and folding the
+/// two together would make the first payload that ever arrives look like a
+/// schema change.
+const String hookNotificationKind = '${hookKindPrefix}Notification';
+
+/// The kind for a `PreCompact` hook payload. Never observed firing; see
+/// [hookNotificationKind].
+const String hookPreCompactKind = '${hookKindPrefix}PreCompact';
+
+/// The kind for a `PostCompact` hook payload. Never observed firing; see
+/// [hookNotificationKind].
+const String hookPostCompactKind = '${hookKindPrefix}PostCompact';
+
+/// The kind for a payload whose `hook_event_name` this build does not know.
+///
+/// **Recording it is not optional.** The hook API is an unstable external
+/// surface (INV10) and a payload sprout cannot name is still evidence a session
+/// exists and is doing something — dropping it would make a live session look
+/// idle. The original name survives verbatim inside the stored payload, so a
+/// later sprout that learns the name can find every row it already holds.
+///
+/// Lower case on purpose: every real event name is `PascalCase`, so this can
+/// never collide with one the wire later introduces.
+const String hookUnknownKind = '${hookKindPrefix}unknown';
+
+/// The kind for hook input that was not a JSON object at all.
+///
+/// Distinct from [hookUnknownKind] the way [runnerLaunchFailedKind] is distinct
+/// from [runnerRefusedKind]: one says sprout does not recognise the event, the
+/// other says there was no event to recognise — truncated input, a crash
+/// mid-write, something that is not JSON. A single kind for both would hide
+/// which of the two a run hit. The stream path already draws this exact line at
+/// `frame.malformed`.
+const String hookMalformedKind = '${hookKindPrefix}malformed';
+
+/// Every `hook_event_name` this build knows, mapped to the kind it records as.
+///
+/// The eleven names confirmed present in the `claude` v2.1.252 binary
+/// (`docs/research/17-observed-schemas.md` §1). All eleven were registered at
+/// once in the Phase 0 probes and eight of them fired; the three that did not
+/// are here for the reason [hookNotificationKind] gives.
+///
+/// A map rather than a `switch` so that the set is enumerable: a consumer can
+/// ask what sprout knows without reading this file, and a test can assert the
+/// eleven keys against the event names a capture corpus actually contains.
+const Map<String, String> hookKindsByEventName = {
+  'SessionStart': hookSessionStartKind,
+  'SessionEnd': hookSessionEndKind,
+  'UserPromptSubmit': hookUserPromptSubmitKind,
+  'PreToolUse': hookPreToolUseKind,
+  'PostToolUse': hookPostToolUseKind,
+  'SubagentStart': hookSubagentStartKind,
+  'SubagentStop': hookSubagentStopKind,
+  'Stop': hookStopKind,
+  'Notification': hookNotificationKind,
+  'PreCompact': hookPreCompactKind,
+  'PostCompact': hookPostCompactKind,
+};
+
+/// The kind for [eventName], or [hookUnknownKind] when this build does not know
+/// it.
+///
+/// Total by construction, including for a null name — a payload that carried no
+/// `hook_event_name` is exactly the unknown case, and there is no input for
+/// which this returns nothing.
+String hookKindForEventName(String? eventName) =>
+    hookKindsByEventName[eventName] ?? hookUnknownKind;

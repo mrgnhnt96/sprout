@@ -16,12 +16,35 @@
 /// both ends need one declaration of. That was finding F-11 for the two node
 /// kinds and F-12 for the five `runner.*` launch and lifecycle kinds.
 ///
+/// The `hook.*` kinds are here for the same reason, declared ahead of their
+/// producer rather than behind it: P8-01 added the vocabulary and the parser,
+/// and P8-02 is what writes a row. The parser itself is deliberately **not**
+/// here — it lives in `package:sproutd/hooks.dart`, on `StreamFrame`'s
+/// precedent, because parsing what an external producer sends is the daemon's
+/// job and only the kinds cross sprout's own wire.
+///
 /// Implementation lives under `lib/src/values/`.
 library;
 
 export 'src/values/event.dart' show SproutEvent;
 export 'src/values/kinds.dart'
     show
+        hookKindForEventName,
+        hookKindPrefix,
+        hookKindsByEventName,
+        hookMalformedKind,
+        hookNotificationKind,
+        hookPostCompactKind,
+        hookPostToolUseKind,
+        hookPreCompactKind,
+        hookPreToolUseKind,
+        hookSessionEndKind,
+        hookSessionStartKind,
+        hookStopKind,
+        hookSubagentStartKind,
+        hookSubagentStopKind,
+        hookUnknownKind,
+        hookUserPromptSubmitKind,
         nodeObservedKind,
         nodeUpdatedKind,
         runnerExitedKind,

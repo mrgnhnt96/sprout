@@ -1,0 +1,126 @@
+{
+  "version": 2,
+  "prefix": "api",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api",
+      "controller": "UiController",
+      "handler": "index",
+      "sse": false,
+      "webSocket": false,
+      "returns": "void",
+      "returnsNullable": false,
+      "params": [
+        {
+          "name": "response",
+          "type": "Response",
+          "required": true,
+          "location": null,
+          "binding": "response"
+        }
+      ],
+      "lifecycle": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/main.css",
+      "controller": "UiController",
+      "handler": "stylesheet",
+      "sse": false,
+      "webSocket": false,
+      "returns": "void",
+      "returnsNullable": false,
+      "params": [
+        {
+          "name": "response",
+          "type": "Response",
+          "required": true,
+          "location": null,
+          "binding": "response"
+        }
+      ],
+      "lifecycle": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/main.client.dart.js",
+      "controller": "UiController",
+      "handler": "bundle",
+      "sse": false,
+      "webSocket": false,
+      "returns": "void",
+      "returnsNullable": false,
+      "params": [
+        {
+          "name": "response",
+          "type": "Response",
+          "required": true,
+          "location": null,
+          "binding": "response"
+        }
+      ],
+      "lifecycle": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/api/tree",
+      "controller": "TreeController",
+      "handler": "snapshot",
+      "sse": false,
+      "webSocket": false,
+      "returns": "Map<String, Object?>",
+      "returnsNullable": false,
+      "params": [],
+      "lifecycle": []
+    },
+    {
+      "method": "WS",
+      "path": "/api/api/tree/events",
+      "controller": "TreeController",
+      "handler": "events",
+      "sse": false,
+      "webSocket": true,
+      "returns": "Stream<StringContent>",
+      "returnsNullable": false,
+      "params": [
+        {
+          "name": "since",
+          "type": "String",
+          "required": true,
+          "location": "@query",
+          "binding": "since"
+        },
+        {
+          "name": "data",
+          "type": "Data",
+          "required": true,
+          "location": null,
+          "binding": "data"
+        },
+        {
+          "name": "cleanUp",
+          "type": "CleanUp",
+          "required": true,
+          "location": null,
+          "binding": "cleanUp"
+        },
+        {
+          "name": "sender",
+          "type": "AsyncWebSocketSender<Stream<StringContent>>",
+          "required": true,
+          "location": null,
+          "binding": "sender"
+        },
+        {
+          "name": "close",
+          "type": "CloseWebSocket",
+          "required": true,
+          "location": null,
+          "binding": "close"
+        }
+      ],
+      "lifecycle": []
+    }
+  ]
+}

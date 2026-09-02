@@ -1,12 +1,21 @@
-/// The `sprout` command line.
+/// The `sprout` command line — and, since P4-01, the daemon as well.
 ///
-/// Three verbs:
+/// Four verbs:
 ///
 /// ```
 /// sprout run "<task>"
 /// sprout snapshot [--json]
 /// sprout watch [--since <cursor>] [--json]
+/// sprout ui
 /// ```
+///
+/// **This file is the whole product.** `dart compile exe bin/sprout.dart`
+/// produces one executable that is both the CLI and the daemon, which is what
+/// `README.md` and `docs/01-plan.md` §13 have claimed since Phase 0 — before
+/// P4-01 there were two, and seeing the board meant compiling
+/// `.revali/server/server.dart` separately and running it yourself with
+/// `SPROUT_DB` and `SPROUT_PORT` set by hand. [UiCommand] explains what that
+/// cost and why `.revali/` is now committed.
 ///
 /// `run` spawns exactly one `claude -p` session at depth 0 through
 /// `package:sproutd/runner.dart` and streams its events to disk and into the
@@ -43,6 +52,15 @@ import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/stream.dart';
 import 'package:sproutd/watch.dart';
+
+// The generated Revali entrypoint, and the app it builds `MainApp` from.
+//
+// Relative, and outside `bin/`, exactly as the generated file itself reaches
+// `../../routes/`. `.revali/server/server.dart` is written by
+// `dart run revali build`; nothing in it is hand-edited, and `createServer`
+// is the one thing this file calls out of it.
+import '../.revali/server/server.dart' as daemon;
+import '../routes/main_app.dart' as app;
 
 /// Everything went as the stream said it would: the process exited 0 and a
 /// `result` frame arrived.
@@ -85,6 +103,17 @@ const int exitCursorMalformed = 5;
 /// the whole point (`docs/01-plan.md` §7). A store that will not open yields no
 /// picture at all, and that is this code.
 const int exitStoreUnreadable = 6;
+
+/// `sprout ui` could not take the port, so it started nothing.
+///
+/// Almost always a daemon that is already up, which is the case worth its own
+/// code: the remedy is "open the URL you already have", not "retry", and a
+/// script that got [exitSessionFailed] would have no way to tell those apart.
+///
+/// The verb refuses rather than picking a free port. A URL the user did not
+/// ask for is a URL their browser tab is not pointed at, and the second
+/// daemon would be invisible except in whichever terminal printed it.
+const int exitPortInUse = 7;
 
 /// Bad arguments. `EX_USAGE` from sysexits.h.
 const int exitUsage = 64;
@@ -130,7 +159,12 @@ Future<int> sprout(
         )
         ..addCommand(
           WatchCommand(out: stdoutSink, err: stderrSink, environment: env),
-        );
+        )
+        // No `environment:`, and that is the point of the comment on
+        // [UiCommand.run]: this verb starts a server that reads the process's
+        // own environment, so an injected map would make it print a URL and a
+        // database the server it just started does not use.
+        ..addCommand(UiCommand(out: stdoutSink, err: stderrSink));
   try {
     return await runner.run(arguments) ?? exitOk;
   } on UsageException catch (error) {
@@ -624,6 +658,163 @@ final class WatchCommand extends Command<int> {
     }
     return code;
   }
+}
+
+/// `sprout ui` — start the daemon in the foreground and print its URL.
+///
+/// The whole leaf is P4-01: seeing the board used to mean compiling two
+/// artifacts and running the second one yourself with `SPROUT_DB` and
+/// `SPROUT_PORT` set. It is now one command with no arguments.
+///
+/// **It is deliberately not a service manager.** No backgrounding, no PID
+/// file, no restart, no `sprout stop`. A foreground process that prints where
+/// it is listening and dies on Ctrl-C is the whole verb; anything that
+/// outlives the terminal is a different decision and should be made on
+/// purpose.
+///
+/// ## Why this makes sprout one binary
+///
+/// Importing `.revali/server/server.dart` is what collapses the artifact count
+/// from two to one, and it costs a build-order coupling: three test files
+/// import `bin/sprout.dart`, so a tree with no `.revali/` would now fail to
+/// analyze *and* fail to compile its tests, not merely skip a check. That is
+/// why `.revali/` is committed as of P4-01 and `.gitignore` says so. It is the
+/// same trade P3-03 made for `lib/src/ui/assets.g.dart`: generated source is
+/// committed when something that must build on a clean checkout names it.
+///
+/// It is a smaller trade than it looks. The generated tree is 501 lines across
+/// seven files, it holds no absolute or machine-specific paths, and
+/// `revali build` re-emits it byte for byte — so a stale `.revali/` is now a
+/// visible diff rather than a local surprise, and the two `the generated
+/// shape` groups in `test/ui_test.dart` and `test/ws_test.dart` no longer skip
+/// themselves on a fresh checkout.
+final class UiCommand extends Command<int> {
+  /// Creates the verb.
+  UiCommand({required this.out, required this.err});
+
+  /// Where the URL goes.
+  final StringSink out;
+
+  /// Where errors go.
+  final StringSink err;
+
+  @override
+  String get name => 'ui';
+
+  @override
+  String get description =>
+      'Start the daemon and print the URL the board is at. Runs in the '
+      'foreground until Ctrl-C.';
+
+  @override
+  String get invocation => 'sprout ui';
+
+  @override
+  Future<int> run() async {
+    if (argResults!.rest.isNotEmpty) {
+      usageException(
+        'sprout ui takes no arguments; set \$${app.daemonPortEnvVariable} or '
+        '\$$databaseEnvVariable to change the port or the database',
+      );
+    }
+
+    // `Platform.environment` and not an injected map, on purpose. The server
+    // started below builds `MainApp` and its DI out of the process's own
+    // environment (`.revali/server/server.dart` calls `MainApp.new()`, and
+    // `MainApp` reads `Platform.environment` in its constructor and again in
+    // `configureDependencies`). A verb that resolved the port and the database
+    // from anywhere else would print two facts about a server that does not
+    // hold them, which is worse than not printing them.
+    final environment = Platform.environment;
+
+    final int port;
+    try {
+      port = app.daemonPortFrom(environment);
+    } on FormatException catch (error) {
+      err.writeln('sprout: ${error.message} (got "${error.source}")');
+      return exitUsage;
+    }
+
+    // Bound here rather than left to the generated `_bindServer`, for the one
+    // reason that `createServer` takes a `providedServer` at all: a port
+    // already in use reaches that code as `print('Failed to bind server')` on
+    // *stdout* followed by `exit(1)`, which is neither a sprout message nor a
+    // code a caller can act on. Binding first makes the refusal ours, and
+    // makes it race-free — there is no window between a probe and the real
+    // bind, because this *is* the real bind.
+    final HttpServer server;
+    try {
+      server = await HttpServer.bind(app.daemonHost, port);
+    } on SocketException catch (error) {
+      err
+        ..writeln(
+          'sprout: cannot listen on ${app.daemonHost}:$port — '
+          '${error.osError?.message ?? error.message}.',
+        )
+        ..writeln(
+          'sprout: a daemon is probably already up. Open '
+          '${_url(app.daemonHost, port)} , or set '
+          '\$${app.daemonPortEnvVariable} to another port.',
+        );
+      return exitPortInUse;
+    }
+
+    // The database the DI will open, resolved through the daemon's own two
+    // functions rather than through this file's `resolveDatabasePath`. The two
+    // agree today; calling the daemon's is what keeps them agreeing.
+    final String database;
+    try {
+      database = p.absolute(
+        app.databasePathFrom(environment) ?? SproutStore.defaultDatabasePath(),
+      );
+    } on StateError catch (error) {
+      await server.close(force: true);
+      err.writeln('sprout: ${error.message}');
+      return exitStoreUnreadable;
+    }
+
+    await daemon.createServer(server);
+
+    // Read off the bound socket, not off `port`. They are the same number
+    // here, and printing the socket's own is what keeps that true if it ever
+    // stops being.
+    out
+      ..writeln(_url(server.address.address, server.port))
+      ..writeln('db  $database')
+      ..writeln('Ctrl-C to stop.');
+
+    return _serveUntilInterrupted(server);
+  }
+
+  /// Holds the process open on [server] and returns when Ctrl-C closes it.
+  ///
+  /// The signal is watched here rather than left to revali's own
+  /// `listenForShutdown`, because the generated server installs that handler
+  /// only when it bound the socket itself — `providedServer == null` — and
+  /// this verb hands it one. Ctrl-C would otherwise kill the process by
+  /// default disposition with the store's WAL still open.
+  Future<int> _serveUntilInterrupted(HttpServer server) async {
+    final stopped = Completer<int>();
+    final interrupts = ProcessSignal.sigint.watch().listen((_) async {
+      if (stopped.isCompleted) return;
+      out.writeln('sprout: stopping.');
+      await server.close(force: true);
+      if (!stopped.isCompleted) stopped.complete(exitOk);
+    });
+    try {
+      return await stopped.future;
+    } finally {
+      await interrupts.cancel();
+    }
+  }
+
+  /// The URL a browser is meant to open.
+  ///
+  /// `127.0.0.1` and never `localhost`: the daemon binds the literal loopback
+  /// address (`main_app.dart` explains why at length — `'localhost'` makes the
+  /// generated `_bindServer` bind every interface), and a printed hostname
+  /// that resolves elsewhere would be a URL the daemon is not on.
+  String _url(String host, int port) => 'http://$host:$port/';
 }
 
 /// One frame, rendered for a human.

@@ -462,4 +462,192 @@ void main() {
       expect(open().tree(), hasLength(1));
     }, timeout: const Timeout(Duration(minutes: 2)));
   });
+
+  group('sprout ui', () {
+    // P4-01. Every test here drives the verb as a PROCESS, and that is not
+    // laziness about speed: `UiCommand` reads `Platform.environment` on
+    // purpose, because the server it starts builds `MainApp` and its DI out of
+    // the process's own environment. A test calling `sprout()` in-process
+    // could not set `SPROUT_PORT` or `SPROUT_DB` for the thing under test, and
+    // one that pretended to would be asserting against a server holding
+    // different values than the ones it passed.
+    late Directory tmp;
+
+    setUp(() => tmp = Directory.systemTemp.createTempSync('sprout-ui-test'));
+    tearDown(() => tmp.deleteSync(recursive: true));
+
+    /// A port nothing is listening on, released before it is returned.
+    ///
+    /// Racy in principle and not in practice — and the alternative, a fixed
+    /// port, races against the developer's own `sprout ui` and against every
+    /// sibling worktree running this suite at the same time, which is a
+    /// collision that actually happens here.
+    Future<int> freePort() async {
+      final probe = await ServerSocket.bind(daemonHost, 0);
+      final port = probe.port;
+      await probe.close();
+      return port;
+    }
+
+    test('is a registered verb, so `sprout` lists it', () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'bin/sprout.dart',
+        '--help',
+      ]);
+      expect(result.stdout, contains('\n  ui '));
+      // The paired negative: `usage` prints every registered command, so this
+      // would pass on any string. These are the other three.
+      expect(result.stdout, contains('\n  run '));
+      expect(result.stdout, contains('\n  snapshot '));
+      expect(result.stdout, contains('\n  watch '));
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('refuses arguments rather than ignoring them', () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'bin/sprout.dart',
+        'ui',
+        '9999',
+      ]);
+      expect(result.exitCode, cli.exitUsage);
+      expect(result.stderr, contains('takes no arguments'));
+      expect(result.stderr, contains(daemonPortEnvVariable));
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('refuses a port that is already taken, and starts nothing', () async {
+      // The brief's rule, and the reason `UiCommand` binds the socket itself:
+      // left to revali's `_bindServer` this is `print(...)` on stdout and
+      // `exit(1)`, which a caller cannot tell from a session failure.
+      final held = await ServerSocket.bind(daemonHost, 0);
+      addTearDown(held.close);
+      final result = await Process.run(
+        Platform.resolvedExecutable,
+        ['run', 'bin/sprout.dart', 'ui'],
+        environment: {
+          'SPROUT_PORT': '${held.port}',
+          'SPROUT_DB': p.join(tmp.path, 'ui.db'),
+        },
+      );
+      expect(result.exitCode, cli.exitPortInUse);
+      expect(result.stderr, contains('cannot listen on $daemonHost:'));
+      expect(result.stderr, contains('already up'));
+      // It refused before opening anything: the store is created by the DI on
+      // first use, and there was no first use.
+      expect(File(p.join(tmp.path, 'ui.db')).existsSync(), isFalse);
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('refuses a SPROUT_PORT that is not a port', () async {
+      final result = await Process.run(
+        Platform.resolvedExecutable,
+        ['run', 'bin/sprout.dart', 'ui'],
+        environment: {'SPROUT_PORT': 'eighty-eighty'},
+      );
+      expect(result.exitCode, cli.exitUsage);
+      expect(result.stderr, contains(daemonPortEnvVariable));
+      expect(result.stderr, contains('eighty-eighty'));
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test(
+      'serves the page, the API and the socket, then stops on Ctrl-C',
+      () async {
+        final port = await freePort();
+        final dbPath = p.join(tmp.path, 'ui.db');
+        final process = await Process.start(
+          Platform.resolvedExecutable,
+          ['run', 'bin/sprout.dart', 'ui'],
+          environment: {'SPROUT_PORT': '$port', 'SPROUT_DB': dbPath},
+        );
+        addTearDown(() => process.kill(ProcessSignal.sigkill));
+
+        final out = <String>[];
+        final lines = process.stdout
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .listen(out.add);
+        final errors = StringBuffer();
+        final errLines = process.stderr
+            .transform(utf8.decoder)
+            .listen(errors.write);
+
+        // Wait for the LAST of the three banner lines, then assert all three.
+        // Waiting on the URL line alone would race the two after it.
+        await _lineAppears(
+          () => out,
+          'Ctrl-C to stop.',
+        ).timeout(const Duration(seconds: 60));
+
+        // Exactly one URL, and that is a regression guard rather than
+        // tidiness: `AppConfig.onServerStarted` prints its own `Serving at
+        // ...` line built from `server.address.host`, so until `MainApp`
+        // overrode it this verb printed two slightly different URLs for one
+        // server and left the human to pick.
+        expect(
+          out.where((line) => line.contains('http://')),
+          hasLength(1),
+          reason: 'one server, one URL. Full stdout: $out',
+        );
+
+        // The URL is read off stdout rather than assumed — the verb's whole
+        // deliverable is that a human does not have to know it in advance.
+        final url = out.firstWhere((line) => line.startsWith('http://'));
+        expect(url, 'http://$daemonHost:$port/');
+        expect(out, contains('db  $dbPath'));
+
+        final client = HttpClient();
+        addTearDown(client.close);
+
+        final page = await (await client.getUrl(Uri.parse(url))).close();
+        expect(page.statusCode, 200);
+        expect(page.headers.contentType?.mimeType, 'text/html');
+        await page.drain<void>();
+
+        final api = await (await client.getUrl(Uri.parse('${url}api/tree')))
+            .close();
+        expect(api.statusCode, 200);
+        await api.drain<void>();
+
+        final socket = await WebSocket.connect(
+          'ws://$daemonHost:$port/api/tree/events',
+        );
+        // `connect` completing IS the 101: dart:io throws
+        // WebSocketException on any other status.
+        expect(socket.readyState, WebSocket.open);
+        await socket.close();
+
+        // Loopback only, still — and IPv4 loopback only. P1-06's guarantee,
+        // re-checked against the launcher because a launcher is exactly the
+        // thing that gets "made convenient" by widening the bind. Asserted at
+        // the TCP layer rather than over HTTP: nothing may accept a connection
+        // here at all, which is a stronger claim than "no route answers".
+        await expectLater(
+          Socket.connect(InternetAddress.loopbackIPv6, port),
+          throwsA(isA<SocketException>()),
+        );
+
+        process.kill(ProcessSignal.sigint);
+        expect(await process.exitCode, cli.exitOk, reason: '$errors');
+        expect(out, contains('sprout: stopping.'));
+        await lines.cancel();
+        await errLines.cancel();
+        expect(
+          File(dbPath).existsSync(),
+          isTrue,
+          reason: 'served off the store',
+        );
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+  });
+}
+
+/// Polls [lines] until [wanted] is among them.
+///
+/// A poll rather than a `firstWhere` on the stream because the caller keeps
+/// the whole transcript for later assertions, and a stream cannot be listened
+/// to twice.
+Future<void> _lineAppears(List<String> Function() lines, String wanted) async {
+  while (!lines().contains(wanted)) {
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
 }

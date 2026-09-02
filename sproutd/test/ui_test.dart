@@ -10,11 +10,13 @@
 /// override ignored. So nothing below asserts what the controller *set*; every
 /// header is read from a real `HttpServer` over a real socket.
 ///
-/// The router is built here rather than imported from `.revali/server/`, which
-/// is generated and git-ignored and therefore absent on a clean checkout. It
-/// mirrors what `revali build` emits verbatim, and `the generated shape` group
-/// reads the generated file when it is present and fails if the two have
-/// drifted. The run of the *compiled binary* — copied out of the source tree
+/// The router is built here rather than imported from `.revali/server/`,
+/// which is generated: a test that imported it would assert the generator
+/// against itself. It mirrors what `revali build` emits verbatim, and `the
+/// generated shape` group reads the generated file and fails if the two have
+/// drifted. That group no longer skips itself — P4-01 committed `.revali/`
+/// because `bin/sprout.dart` imports it, so its absence is now a broken tree
+/// rather than a clean checkout. The run of the *compiled binary* — copied out of the source tree
 /// and started with `cwd=/` — is in the commit message, which is the only
 /// proof that covers `dart compile exe` itself.
 library;
@@ -210,21 +212,28 @@ void main() {
   });
 
   group('the generated shape', () {
-    // `.revali/` is a git-ignored build artifact, so these read it when it is
-    // there and say so when it is not. A clean checkout has none until
-    // `dart run revali build` runs, and silently passing then would make this
-    // group a check that cannot fail (INV8).
+    // `.revali/` is COMMITTED as of P4-01 (`bin/sprout.dart` imports it to be
+    // the daemon as well as the CLI), so these read it unconditionally. They
+    // used to skip when it was absent; a missing file is now a real failure,
+    // because a tree without it does not build at all.
     final ui = File('.revali/server/routes/__r0_route.dart');
     final api = File('.revali/server/routes/__api_tree_route.dart');
 
+    test('the generated tree is committed, so nothing below can skip', () {
+      // The guard on the two tests after this one. They assert the CONTENTS of
+      // these files; if the files vanished those tests would fail with a
+      // filesystem error that reads like a broken test rather than like the
+      // real cause, which is that someone re-ignored `.revali/`.
+      expect(ui.existsSync(), isTrue, reason: 'run `dart run revali build`');
+      expect(api.existsSync(), isTrue, reason: 'run `dart run revali build`');
+      expect(
+        File('.gitignore').readAsStringSync(),
+        isNot(matches(RegExp(r'^\.revali/', multiLine: true))),
+        reason: '.revali/ must stay tracked: bin/sprout.dart imports it',
+      );
+    });
+
     test('mounts the UI controller at the root', () {
-      if (!ui.existsSync()) {
-        markTestSkipped(
-          'no .revali/ in this tree — run `dart run revali build`. NOT a pass: '
-          'the generated route shape was not read at all.',
-        );
-        return;
-      }
       final source = ui.readAsStringSync();
       // The container route is the empty path; that is what puts the page at
       // `/` rather than under a prefix.
@@ -240,13 +249,6 @@ void main() {
     });
 
     test('leaves the API on /api/tree', () {
-      if (!api.existsSync()) {
-        markTestSkipped(
-          'no .revali/ in this tree — run `dart run revali build`. NOT a pass: '
-          'the generated route shape was not read at all.',
-        );
-        return;
-      }
       // The prefix moved from the app to the controller in P3-03. The URL did
       // not, and this is the file that would show it if it had.
       expect(api.readAsStringSync(), contains("Route(\n    'api/tree',"));

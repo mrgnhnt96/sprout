@@ -113,6 +113,22 @@ final class MainApp extends AppConfig {
         prefix: daemonAppPrefix,
       );
 
+  /// Silent, because `sprout ui` prints the banner itself.
+  ///
+  /// `AppConfig`'s default `print`s `Serving at http://<host>:<port>` (revali_core
+  /// 3.2.0, `app_config.dart`). Left in place, `sprout ui` emits that line and
+  /// then its own URL — two URLs for one server, one of them built from
+  /// `server.address.host` rather than from the address actually bound. A
+  /// human reading two slightly different URLs has to work out which one to
+  /// paste, and that is the exact confusion this verb exists to remove.
+  ///
+  /// This silences the banner for every consumer of the app, `revali dev`
+  /// included. That is the intended scope: the generated `main` is no longer
+  /// how the daemon is started (`bin/sprout.dart` is), so a banner nothing
+  /// prints from is one fewer thing to keep in step.
+  @override
+  void onServerStarted(HttpServer server) {}
+
   @override
   Future<void> configureDependencies(DI di) async {
     // Lazy: the file is opened on the first request that needs it, and the

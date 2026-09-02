@@ -47,6 +47,50 @@ timer cannot substitute for it — an unread inbound message is not late, it is 
 
 ---
 
+## F-06 — The ping closes healthy sockets too, at twice the ping interval
+
+**Status:** BLOCKING Phase 3 · **Found by:** the trunk proof of F-03 · **Fix lives in:**
+`sproutd/routes/controllers/tree_controller.dart`, or upstream `revali_router`
+
+F-03's fix works: the annotation's ping now reaches the generated route, and a peer that has gone
+away is reclaimed instead of leaking a watch session. But the teardown does not distinguish a live
+peer from a dead one. **Every connection is closed at 2x the ping interval, whether or not the
+client answers.**
+
+Measured on trunk (HEAD `305e106`) against the compiled daemon run from `/`, on a real loopback
+socket, with the generated route carrying `ping: Duration(microseconds: 15000000)`:
+
+```
+client that never pongs      +15.0s  <-- PING (opcode 9)
+                             +30.0s  CLOSE code 1001
+client that DOES pong        +15.0s  <-- PING, well-formed masked pong sent
+                             +30.0s  CLOSE code 1001      <-- identical
+```
+
+Before the fix the same probe held a socket **40.0s with no close** (the Phase 2 proof), so the
+close is new with this change and not pre-existing behaviour.
+
+**The mechanism, stated at the confidence it was established:** the close at 1001 after an
+unanswered ping is `dart:io`'s documented `WebSocket.pingInterval` behaviour, and that half is
+directly observed. That the pong is *never seen* is inferred — but it follows from **F-05**, which
+records that `revali_router 5.1.1`'s `execute()` awaits `runHandler(onConnect)` to completion
+before calling `listenToMessages()`. Nothing reads the socket while the handler streams, so an
+inbound pong is never processed and the ping timer cannot be satisfied by anything. **F-06 and F-05
+are the same unread socket seen from two sides**, which is also why an application-level fix cannot
+work — the same reason F-03 warned against an application-level timeout.
+
+Why this blocks Phase 3: the UI's whole model is one long-lived socket carrying snapshot-then-
+deltas. At 15s ping it is dropped every 30 seconds. A reconnect loop would paper over it and would
+also re-send a full snapshot twice a minute, which is exactly the "attaching is never a blank
+screen" property the protocol was built to provide, spent on a timer.
+
+**Do not "fix" this by removing the ping** — that restores F-03's leak, and the two paired
+`ws_test.dart` cases pin both halves. The honest options are a revali-side change so the socket is
+serviced while the handler streams (which also closes F-05), or a local transport bypass that owns
+its own liveness check and can actually observe the pong.
+
+---
+
 ## Notes that are not findings
 
 These are true, cost nothing to know, and would cost real time to rediscover.

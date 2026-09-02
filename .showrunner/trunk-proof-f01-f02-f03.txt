@@ -1,0 +1,57 @@
+Trunk proof — F-01, F-02, F-03 against the COMPILED binaries, daemon run from /
+sprout HEAD 305e106 (merges of 6c343b1, b36a1cd, a903732), 2026-09-01.
+
+Branch-green is not trunk-green; these are the merged-trunk runs.
+
+Binaries: dart compile exe .revali/server/server.dart -> sproutd (7.9 MB)
+          dart compile exe bin/sprout.dart            -> sprout  (6.7 MB)
+Database seeded by the COMPILED CLI, cwd=/, replaying the Phase 0 capture
+docs/research/fixtures/phase0/streams/B.ndjson (122 frames, root + 2 subagents).
+
+=== F-01 — one instance derivation, shared by CLI and daemon ===
+CLI:    sprout snapshot --json  ->  cursor s1.d6c1a3baccc97eca.131
+Daemon: GET /api/tree/events?since=s1.d6c1a3baccc97eca.131
+        +1ms  snapshot  s1.d6c1a3baccc97eca.131
+        +2ms  ready     s1.d6c1a3baccc97eca.131
+        ACCEPTED. The two surfaces agree on the id; the join holds end to end.
+
+Paired negative (INV8) — a genuinely foreign cursor is STILL refused:
+        since=s1.00000000deadbeef.3
+        +0ms  bye  "cursor belongs to sproutd instance 00000000deadbeef, but this
+                    is instance d6c1a3baccc97eca -- its position is meaningless
+                    here; take a fresh snapshot"
+        So the fix did not make the check permissive; it made the ids equal.
+
+=== F-02 — creating a subagent node appends an event ===
+Read from the real feed of the seeded database (table `event`), 131 events:
+        seq=1    runner.spawned   <root>
+        seq=14   runner.session   <root>
+        seq=34   runner.observed  <root>/toolu_013CdYLPDjwGfSwE5gL5Q7BK
+        seq=42   runner.updated   <root>/toolu_013CdYLPDjwGfSwE5gL5Q7BK
+        seq=52   runner.observed  <root>/toolu_01HLJXeJprJTzcM7oW2Zz1vp
+        seq=56   runner.updated   <root>/toolu_01HLJXeJprJTzcM7oW2Zz1vp
+        seq=74   runner.updated   <root>/toolu_013CdYLPDjwGfSwE5gL5Q7BK
+        seq=91   runner.updated   <root>/toolu_01HLJXeJprJTzcM7oW2Zz1vp
+        seq=131  runner.exited    <root>
+subagent nodes in feed: 2 · announced by runner.observed: 2 · UNANNOUNCED: none.
+
+Note the observed->updated pairs. That is the two-kind design earning itself:
+the subagent is first seen on a partial tool-use whose input is not assembled,
+so current_task is null at creation and arrives afterwards. A creation-only fix
+would have announced a node whose label never renders.
+
+=== F-03 — the ping survives revali build, so a dead peer is reclaimed ===
+Transport-level frame capture on a real loopback socket:
+        +15.0s  <-- PING, opcode 9
+The annotation's 15s now reaches the generated route: .revali/server/routes/
+__tree_route.dart carries `ping: Duration(microseconds: 15000000)`, where before
+the fix the WebSocketRoute had no `ping:` argument at all. F-03 is fixed.
+
+=== BUT: a new defect this exposes — see F-06 in docs/02-open-findings.md ===
+A client that answers the ping with a well-formed masked pong is closed anyway:
+        +15.0s  ping -> client sent pong
+        +30.0s  CLOSE frame, code 1001, empty reason
+Same result with a client that never pongs. The teardown fires at 2x the ping
+interval regardless of whether the peer is alive, so the ping reclaims dead
+sockets and healthy ones alike. Pre-fix, a socket was held 40.0s and never
+closed (the Phase 2 proof), so the close is new with this change.

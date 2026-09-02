@@ -39,6 +39,12 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// `lib/src/ui/assets.g.dart`, written by `tool/embed_assets.dart` — and
 /// generated source that nothing names is the hazard `.game_loop/verify.yaml`
 /// opens with.
+///
+/// `liveness` is P6-01's: live / stalled / abandoned, derived now from a pid
+/// beside a transcript mtime. It is its own area rather than part of `runner`
+/// because it reads a session it did not spawn — that is the whole point of
+/// watching from outside — and because nothing in it may ever act on what it
+/// finds, which is easier to keep true of a library than of a corner of one.
 const libraries = {
   'store',
   'stream',
@@ -48,6 +54,7 @@ const libraries = {
   'snapshot',
   'watch',
   'ui',
+  'liveness',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

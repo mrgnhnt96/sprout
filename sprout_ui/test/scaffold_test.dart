@@ -12,7 +12,13 @@ const pinnedExactly = {'jaspr': '0.23.4', 'jaspr_builder': '0.23.4'};
 /// Dependencies with no verified-version claim behind them, so a caret is
 /// correct. Asserting this next to [pinnedExactly] is what keeps the pin test
 /// from passing vacuously: swap the two sets and exactly one group fails.
-const caretRanged = {'jaspr_cli', 'build_runner', 'lints', 'test'};
+const caretRanged = {
+  'universal_web',
+  'jaspr_cli',
+  'build_runner',
+  'lints',
+  'test',
+};
 
 /// Reads the resolved version of [package] out of a `pubspec.lock`.
 String? lockedVersion(String lock, String package) {

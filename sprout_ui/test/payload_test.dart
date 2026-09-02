@@ -88,8 +88,51 @@ void main() {
     // literals, so the app's own copy is a fingerprint that a leftover bundle
     // from a different revision would not carry.
     final js = File('${out.path}/main.client.dart.js').readAsStringSync();
-    expect(js, contains('The UI payload is served'));
     expect(js, contains('sprout-shell'));
+    expect(js, contains('STREAM ENDED'));
+  });
+
+  test('THE PROTOCOL IS IN THE BUNDLE, not merely on the import graph', () {
+    // The fingerprint P3-05 could not honestly have.
+    //
+    // Until P3-04 the only construction of `App` was `const App()` with
+    // `frame: null`, so dart2js proved every other branch of the switch
+    // unreachable and dropped it: the bundle carried `sprout-shell` and none
+    // of the protocol's own literals. A non-empty bundle therefore proved the
+    // import GRAPH — which is all F-07 was about — and said nothing about
+    // whether a frame could be decoded. `docs/02-open-findings.md` records the
+    // gap and says to close it here.
+    //
+    // These strings exist only inside `package:sprout_protocol`, in code that
+    // is reached only by actually decoding and rendering a frame. A build that
+    // reverted the UI to a stub would keep every assertion above and fail
+    // these.
+    final js = File('${out.path}/main.client.dart.js').readAsStringSync();
+    for (final fingerprint in const [
+      // spend.dart — the loud absence marker on a node line.
+      'NONE SCHEDULED',
+      // snapshot.dart — the field that must survive any compression.
+      'journal_unreadable',
+      // resource.dart — the held-resource rendering.
+      'holds nothing',
+      // frame.dart — the decoder's refusal, reachable only from decodeLine.
+      'unknown frame type',
+      'ProtocolFormatException',
+      // node.dart — status parsing, reached from a real snapshot node.
+      'not a known node status',
+    ]) {
+      expect(
+        js,
+        contains(fingerprint),
+        reason:
+            '"$fingerprint" is gone from the bundle, so dart2js proved the '
+            'protocol unreachable — the UI has stopped decoding frames',
+      );
+    }
+    // And the wire vocabulary the board branches on, which is what makes the
+    // deltas do any work at all.
+    expect(js, contains('runner.observed'));
+    expect(js, contains('runner.updated'));
   });
 
   test('the stylesheet is generated from the @css getters', () {
@@ -98,7 +141,11 @@ void main() {
     // and the page renders unstyled with the build still green.
     final css = File('${out.path}/main.css').readAsStringSync();
     expect(css, contains('.sprout-shell'));
-    expect(css, contains('height: 100vh'));
+    // Load-bearing rather than decorative: `SnapshotNode.render` indents a
+    // nested node with real spaces, which HTML collapses by default, and
+    // `pre-wrap` is what makes the tree's shape visible while still wrapping a
+    // long line onto a phone instead of scrolling sideways.
+    expect(css, contains('white-space: pre-wrap'));
   });
 
   test('index.html is copied through and still names the bundle', () {

@@ -43,6 +43,13 @@ dependencies:
   # F-07. `test/payload_test.dart` is what makes it loud.
   sprout_protocol:
     path: ../sprout_protocol
+  # The browser's own WebSocket, MessageEvent and Location, through the
+  # conditional export jaspr already depends on. `package:web` directly would
+  # work in the bundle and break `dart test`, which runs on the VM: this
+  # package exports `package:web/web.dart` on the web and a VM stub with the
+  # same declarations elsewhere, so `lib/src/tree_socket.dart` analyzes and
+  # compiles under both toolchains and only ever runs under one.
+  universal_web: ^1.1.0
 
 dev_dependencies:
   # Pinned: emits the client bundle, and it is half of the conflict above.

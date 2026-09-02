@@ -13,7 +13,12 @@
 ///
 /// - **`snapshot`** is the whole world at one instant; **`watch`** is deltas
 ///   against it. They join on the [Cursor], because *"an event saying
-///   `leaf.closed` is not a picture, it is a delta against one."*
+///   `leaf.closed` is not a picture, it is a delta against one."* It arrives
+///   as a [SnapshotFrame], so **one decoder reads every line on the wire** —
+///   the picture the socket opens with included. [SnapshotFrame] carries the
+///   `SproutSnapshot` that `lib/snapshot.dart` owns rather than a second
+///   description of it, which is why this library still holds no pictures of
+///   its own.
 /// - [ReadyFrame] marks the end of replay, so attaching is never a blank
 ///   screen — and it is emphatically not the same thing as a [DeltaFrame] that
 ///   happened to carry no events.
@@ -47,6 +52,7 @@ export 'src/protocol/frame.dart'
         ProtocolFormatException,
         ProtocolFrame,
         ReadyFrame,
+        SnapshotFrame,
         eventFromJson,
         eventToJson;
 export 'src/protocol/instance.dart' show SproutInstance;

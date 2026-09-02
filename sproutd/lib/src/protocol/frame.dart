@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../store.dart';
+import '../snapshot/snapshot.dart';
 import 'cursor.dart';
 
 /// Thrown when a line on the wire is not a frame this build understands.
@@ -94,6 +95,7 @@ sealed class ProtocolFrame {
       throw ProtocolFormatException('frame has no "type"', jsonEncode(json));
     }
     return switch (type) {
+      SnapshotFrame.wireType => SnapshotFrame.fromJson(json),
       ReadyFrame.wireType => ReadyFrame.fromJson(json),
       HeartbeatFrame.wireType => HeartbeatFrame.fromJson(json),
       ByeFrame.wireType => ByeFrame.fromJson(json),
@@ -146,6 +148,67 @@ sealed class ProtocolFrame {
 
   @override
   String toString() => encodeLine();
+}
+
+/// The opening frame: the whole world at one cursor, before any delta.
+///
+/// This is the **first** thing a socket sends (`routes/controllers/
+/// tree_controller.dart`), which is why it is a [ProtocolFrame] at all: a
+/// decoder that threw on the first line it read forced every consumer to
+/// special-case `type == "snapshot"` before it could use one decoder
+/// ([ProtocolFrame.decodeLine]) for the rest. That was finding F-04.
+///
+/// It carries a [SproutSnapshot] — **the type `lib/snapshot.dart` already
+/// owns**, not a second description of one. Encoding is
+/// `SproutSnapshot.toJson` with a `type` added, decoding is
+/// `SproutSnapshot.fromJson`, and both live beside each other in the snapshot
+/// library. Two representations of one picture that must stay equal is the
+/// bug F-01 was, and the repair there was one derivation shared rather than
+/// two that agree.
+///
+/// The library's promise still holds: this is a pure value. Nothing here
+/// touches a store, a socket or a clock — `takeSnapshot` does the reading and
+/// the snapshot it returns is already just data, `takenAt` included.
+///
+/// [cursor] is [SproutSnapshot.cursor] itself and not a copy of it, so the
+/// position the deltas resume from cannot drift from the position the picture
+/// was taken at.
+///
+/// [marksEndOfReplay] is **false** here, as it is on everything except
+/// [ReadyFrame]. A snapshot is where replay starts, not where it ends: the
+/// backlog after it may be empty or may be thousands of events, and a
+/// consumer that went live on the picture would show a tree it has not caught
+/// up to yet.
+final class SnapshotFrame extends ProtocolFrame {
+  /// Wraps [snapshot], taking its cursor as the frame's.
+  SnapshotFrame({required this.snapshot}) : super(cursor: snapshot.cursor);
+
+  /// The `type` string.
+  static const String wireType = 'snapshot';
+
+  /// Decodes a `snapshot` object.
+  ///
+  /// The snapshot library throws [FormatException] because it knows nothing
+  /// about this protocol; the wrap is what keeps [ProtocolFrame.decodeLine]'s
+  /// promise that it returns a frame or throws [ProtocolFormatException].
+  factory SnapshotFrame.fromJson(Map<String, Object?> json) {
+    try {
+      return SnapshotFrame(snapshot: SproutSnapshot.fromJson(json));
+    } on FormatException catch (error) {
+      throw ProtocolFormatException(error.message, jsonEncode(json));
+    } on ArgumentError catch (error) {
+      throw ProtocolFormatException('${error.message}', jsonEncode(json));
+    }
+  }
+
+  /// The picture this frame carries.
+  final SproutSnapshot snapshot;
+
+  @override
+  String get type => wireType;
+
+  @override
+  Map<String, Object?> toJson() => {'type': wireType, ...snapshot.toJson()};
 }
 
 /// End of replay: everything the consumer asked to catch up on has been sent.

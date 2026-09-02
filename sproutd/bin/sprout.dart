@@ -635,6 +635,13 @@ final class WatchCommand extends Command<int> {
 /// a `delta` that carries no events — the type permits one, and a line saying
 /// so is honest where silence is not.
 String renderFrame(ProtocolFrame frame) => switch (frame) {
+  // `watch` never receives one — `watchFrames` does not emit a picture — but
+  // the socket in `routes/` opens with one, and the sealed switch is what
+  // makes that a compile error here rather than a frame nobody renders. The
+  // snapshot's own `render()` is reused so a picture reads identically
+  // whichever surface printed it.
+  SnapshotFrame(:final snapshot) =>
+    'snapshot | ${frame.cursor.encode()}\n${snapshot.render()}',
   ReadyFrame() => 'ready | ${frame.cursor.encode()} | end of replay',
   HeartbeatFrame(:final sentAt) =>
     'heartbeat | ${frame.cursor.encode()} | ${sentAt.toIso8601String()}',

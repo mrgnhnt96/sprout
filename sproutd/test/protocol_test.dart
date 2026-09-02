@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:sproutd/protocol.dart';
+import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
@@ -803,6 +804,83 @@ void main() {
       // and the other as a {from, to} patch. Collapsing them would make a
       // change indistinguishable from a second creation.
       expect(nodeObservedKind, isNot(nodeUpdatedKind));
+    });
+  });
+
+  group('and so are the runner event kinds', () {
+    // The same argument as the group above, one library later. These five are
+    // what `SessionRunner` and `StoreProjection` append around a launch, and
+    // they were bare literals at the call site until F-12 — so when
+    // `lib/src/liveness/measure.dart` needed three of them it declared them a
+    // second time, which is F-01's shape and exactly what F-11 had just been.
+    // There is one declaration now, in `package:sprout_protocol/values.dart`,
+    // and `liveness_test.dart` no longer has to read the runner's source to
+    // check the spellings agree.
+    //
+    // What no type can check is still the VALUE, so these are literal on
+    // purpose. Every one of them is in the `kind` column of every
+    // `~/.sprout/*.db` sprout has written, the feed is append-only by schema
+    // trigger, and there is no rewrite path — a consumer taught a new spelling
+    // would quietly stop recognising history it already holds. Change any line
+    // below only on purpose.
+    //
+    // And note HOW they are reached: this file imports
+    // `package:sproutd/runner.dart`, never sprout_protocol directly, so these
+    // lines do not compile unless the producer library still publishes the
+    // vocabulary it writes.
+
+    test('runner.spawned keeps its spelling', () {
+      // The one with teeth: `LivenessMeasure` finds a node's pid, transcript
+      // path and spawn time by looking for exactly this string. A rename with
+      // no compile error made every node read as `abandoned`.
+      expect(runnerSpawnedKind, 'runner.spawned');
+    });
+
+    test('runner.refused keeps its spelling', () {
+      expect(runnerRefusedKind, 'runner.refused');
+    });
+
+    test('runner.launch_failed keeps its spelling', () {
+      expect(runnerLaunchFailedKind, 'runner.launch_failed');
+    });
+
+    test('runner.session keeps its spelling', () {
+      expect(runnerSessionKind, 'runner.session');
+    });
+
+    test('runner.exited keeps its spelling', () {
+      expect(runnerExitedKind, 'runner.exited');
+    });
+
+    test('and all seven kinds are distinct', () {
+      // A board branches on these, so two that collided would make one event
+      // arrive as the other — and the collision would be invisible to every
+      // test that only ever checks a kind against itself.
+      final kinds = {
+        nodeObservedKind,
+        nodeUpdatedKind,
+        runnerSpawnedKind,
+        runnerRefusedKind,
+        runnerLaunchFailedKind,
+        runnerSessionKind,
+        runnerExitedKind,
+      };
+      expect(kinds, hasLength(7));
+    });
+
+    test('and none of them collides with the frame prefix', () {
+      // `StoreProjection` writes every CLI frame as `frame.<type>`, so a
+      // `runner.*` kind that started with `frame.` would be read back as a
+      // frame the CLI emitted rather than a record the runner made.
+      for (final kind in [
+        runnerSpawnedKind,
+        runnerRefusedKind,
+        runnerLaunchFailedKind,
+        runnerSessionKind,
+        runnerExitedKind,
+      ]) {
+        expect(kind, isNot(startsWith(frameKindPrefix)));
+      }
     });
   });
 }

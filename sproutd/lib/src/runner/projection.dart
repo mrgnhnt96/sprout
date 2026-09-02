@@ -1,6 +1,8 @@
 /// Folding a session's frames into the store, one frame at a time.
 library;
 
+import 'package:sprout_protocol/values.dart';
+
 import '../../store.dart';
 import '../../stream.dart';
 
@@ -115,7 +117,7 @@ final class StoreProjection {
     final init = transcript.inits.first;
     store.append(
       nodeId: rootId,
-      kind: 'runner.session',
+      kind: runnerSessionKind,
       payload: {
         'session_id': init.sessionId ?? transcript.sessionId,
         'model': init.model,

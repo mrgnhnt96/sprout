@@ -590,29 +590,27 @@ void main() {
     });
   });
 
-  group('the runner event kinds this library re-spells', () {
-    test('still match what session_runner.dart writes', () {
-      // F-12: these three strings are declared in `measure.dart` as well as in
-      // `session_runner.dart`, because lifting them into one declaration means
-      // editing a file this leaf does not own. Until that happens, a rename
-      // fails HERE rather than silently making every node abandoned — which is
-      // the failure F-11 was, and it is invisible to a green suite otherwise.
-      final source = File('lib/src/runner/session_runner.dart')
-          .readAsStringSync();
-      for (final kind in [
-        runnerSpawnedKind,
-        runnerRefusedKind,
-        runnerLaunchFailedKind,
-      ]) {
-        expect(
-          source,
-          contains("kind: '$kind'"),
-          reason: '$kind is no longer what the runner appends',
-        );
-      }
-    });
+  group('what this library reads out of what the runner writes', () {
+    // This group used to have a first test that read `session_runner.dart` as
+    // TEXT and asserted it still contained `kind: '<each kind>'`, because the
+    // three kinds were declared here AND at the runner's call sites and
+    // nothing but a text check could keep two derivations equal.
+    //
+    // **That half is gone, and it is gone because it became impossible to
+    // violate, not because it stopped mattering.** F-12 lifted the five
+    // `runner.*` kinds into `package:sprout_protocol/values.dart`; producer
+    // and reader now share one declaration, so a rename is a compile error in
+    // both packages and `protocol_test.dart` pins the wire text itself.
+    //
+    // **The half below did NOT move.** The payload KEYS are still two
+    // derivations: `session_runner.dart` writes the map literal and
+    // `measure.dart` reads `payload['pid']` and `payload['raw_log']` by
+    // string, with no type between them. A renamed key still compiles on both
+    // sides and still makes every node read as `abandoned` while every
+    // liveness test passes against its own fixture. So the text check stays,
+    // narrowed to exactly the part the type system cannot carry.
 
-    test('and the runner still records the pid and the raw log path', () {
+    test('the runner still records the pid and the raw log path', () {
       final source = File('lib/src/runner/session_runner.dart')
           .readAsStringSync();
       expect(source, contains("'pid': process.pid"));

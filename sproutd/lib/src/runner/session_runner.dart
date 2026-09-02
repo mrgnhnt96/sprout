@@ -7,6 +7,7 @@ import 'dart:io' show ProcessSignal;
 import 'dart:math';
 
 import 'package:path/path.dart' as p;
+import 'package:sprout_protocol/values.dart';
 
 import '../../policy.dart';
 import '../../store.dart';
@@ -132,7 +133,7 @@ final class SessionRunner {
       case SpawnRefusal():
         store.append(
           nodeId: nodeId,
-          kind: 'runner.refused',
+          kind: runnerRefusedKind,
           payload: {
             'reason': decision.reason.wire,
             'explanation': decision.explanation,
@@ -161,7 +162,7 @@ final class SessionRunner {
     } on Object catch (error) {
       store.append(
         nodeId: nodeId,
-        kind: 'runner.launch_failed',
+        kind: runnerLaunchFailedKind,
         payload: {'error': error.toString(), 'launch': launch.toJson()},
         ts: _clock(),
       );
@@ -170,7 +171,7 @@ final class SessionRunner {
 
     store.append(
       nodeId: nodeId,
-      kind: 'runner.spawned',
+      kind: runnerSpawnedKind,
       payload: {
         'pid': process.pid,
         'launch': launch.toJson(),
@@ -316,7 +317,7 @@ final class LiveSession implements SessionStart {
       );
       _projection.store.append(
         nodeId: nodeId,
-        kind: 'runner.exited',
+        kind: runnerExitedKind,
         payload: ended.toJson(),
         ts: _clock(),
       );

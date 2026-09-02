@@ -68,34 +68,28 @@ the grant, and produced the log entry. Same file, same content, same session, sa
 interpreter path is unguarded and the shell path is guarded. That is the gap in one pair of runs,
 and it is why the remedy has to be detection on the file rather than more parsing of the command.
 
-### F-12 — The `runner.*` event kinds are string literals, so a second reader has to re-spell them
+### F-13 — `sprout_protocol/pubspec.yaml` still says the gate does not check it, and the gate does
 
-**Status: OPEN.** Found by the P6-01 Crawler. **Fix lives in** `sproutd/lib/src/runner/session_runner.dart`
-and `sprout_protocol/lib/src/values/`, neither of which P6-01 owned.
+**Status: OPEN.** Found by the F-12 Crawler, which read the comment before running the checks and
+believed it.
 
-`SessionRunner` writes four event kinds as bare literals at the call site — `'runner.refused'`
-(`:135`), `'runner.launch_failed'` (`:164`), `'runner.spawned'` (`:173`) and `'runner.exited'`
-(`:319`). Nothing exports them, so the moment a second reader needs one it has to spell it again.
-`sproutd/lib/src/liveness/measure.dart` is that second reader: it looks for `runner.spawned` to
-find a node's pid, raw-log path and spawn time, and for the other two to say *why* a node never
-started.
+`sprout_protocol/pubspec.yaml:60` states, in bold: *"`.game_loop/verify.yaml` still owes this
+package a rule … Until one lands, a change confined to `sprout_protocol/**` is UNCHECKED"*. That
+rule landed. `.game_loop/verify.yaml:111` carries a `"sprout_protocol/**"` entry running this
+package's format and analyze plus **both** consumers' suites — the exact shape the comment asks
+for, with its own comment above it explaining why the consumers are the load-bearing half.
 
-**This is exactly the shape of F-11**, which lifted `nodeObservedKind` and `nodeUpdatedKind` into
-`package:sprout_protocol/values.dart` because `sprout_ui` had spelled them a second time. The same
-argument applies here and is slightly stronger: `runner.spawned` carries a `pid`, and P6-03 will
-put a liveness verdict on the wire, so a browser will branch on these kinds too.
+The rest of the paragraph is still true and worth keeping: `cd sproutd && dart analyze
+--fatal-infos` really does not analyze these sources, which is why the rule has to exist. Only the
+"still owes" claim and the "UNCHECKED" conclusion are stale.
 
-**Why it was not fixed here.** Lifting them means editing `session_runner.dart`, which belongs to
-another leaf's file set, and adding declarations to `sprout_protocol`. Reaching outside a leaf is
-how two concurrent Crawlers corrupt each other's work.
+**Why it matters more than a stale comment usually does.** It tells the next reader their change to
+this package is unverified when it is in fact the most heavily verified path in the repo — and the
+plausible reactions to believing it are all wrong: skip the gate, hand-test instead, or re-add a
+rule that already exists. A comment that understates coverage is read as permission.
 
-**What is holding the line meanwhile.** `sproutd/test/liveness_test.dart` reads
-`session_runner.dart` as text and asserts it still contains `kind: '<each kind>'`, plus
-`'pid': process.pid`, `'raw_log': rawLogPath` and the `<nodeId>.ndjson` path expression. So a
-rename or a moved payload key fails a test rather than silently making every node read as
-`abandoned` — which is the failure a green suite cannot otherwise see, because both sides would
-still compile and every liveness test would still pass against its own constant.
-
+**Why it was not fixed here.** F-12 touched this package's `lib/`, not its `pubspec.yaml`, and the
+correction is a prose edit with no test that can hold it.
 
 ---
 

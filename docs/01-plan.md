@@ -312,8 +312,50 @@ on branches: 7.4 MB binary, run from `/`, serving the snapshot on loopback with 
 and refusing both the LAN address and `::1`; `sprout run` spawned a real depth-0 session, and the
 store recorded 27 gapless events whose `UPDATE` the trigger refuses.
 
-**Phase 2 — observation.** `snapshot` + `watch --since <cursor>` with `ready`/`heartbeat`/`bye`.
-CLI consumer first; correctness of the protocol before any pixels.
+**Phase 2 — observation. ✅ DONE** — 242 tests, five leaves built through showrunner in their own
+worktrees and integrated with checks green against the recorded baseline. The protocol is taken
+whole from showrunner (§7): a `Cursor` is the token `s1.<instance>.<seq>`, so a consumer
+reconnecting to a *restarted* sproutd is refused rather than silently resumed at a seq that has
+come to mean something else; `snapshot` is the whole world at one cursor, printing `NONE SCHEDULED`
+and `since ?` rather than a blank or a guess, and carrying `journal_unreadable` when the feed
+cannot be read; `watch --since` replays, emits exactly one `ready`, then live deltas, with
+`heartbeat` on an idle stream and a `bye` carrying its reason. `marksEndOfReplay` is true on
+`ready` alone, so a delta that happened to carry no events can never be mistaken for the end of
+replay. Verified on trunk rather than on a branch: the compiled binary run from `/` answers
+`GET /api/tree/events` with `101`, opens with `snapshot` then `ready`, and heartbeats at +15.0s
+and +30.0s of silence over a socket held 40s — where the same probe against the pre-merge binary
+got one `{"data":{"type":"hello","cursor":0}}` frame and a close code 1000 at +1ms. `sprout watch`
+refuses a foreign cursor with exit 4 and a malformed one with exit 5, each naming what it saw.
+
+Three findings from Phase 2 are recorded and **not** repaired, because each lies outside the leaf
+that found it. They are the first things Phase 3 will hit:
+
+1. **The CLI and the daemon do not agree on an instance id.** `SproutInstance.current` is generated
+   per process, so a cursor from `sprout snapshot` is refused by the socket as foreign. `bin/`
+   already derives a stable id from the absolute database path plus the identity of the feed's
+   first event; the fix is lifting that into `lib/protocol.dart` as `SproutInstance.forStore(...)`.
+   Forking a second hash that must stay equal would be the bug, not the fix. Pinned by a test that
+   fails the day it lands.
+2. **Creating a subagent node appends no event.** `StoreProjection._syncSubagents` writes the row
+   with `putNode` and emits nothing, while every frame it emits is attributed to the emitting node.
+   A consumer holding a snapshot plus every delta after it therefore still does not know that
+   subagent exists — only a fresh `snapshot` reveals it. A new *root* does announce itself, via
+   `runner.spawned`. This is a Phase 3 blocker for a UI that expects to stay current from `watch`
+   alone.
+3. **`@WebSocket.ping(...)` is silently dropped.** `revali_construct 3.0.0` reads `Duration`'s
+   private `_duration`, which Dart 3.13.2 replaced with the public `inMicroseconds`; `revali build`
+   succeeds with no warning. Without a ping nothing reads the socket while the connect handler is
+   streaming, so a client hang-up is never noticed and every disconnect leaks a watch session and
+   its two timers. Measured: still subscribed 12s after the client left with no ping, torn down in
+   2219ms at ping 1s. Passing a `Duration` straight to `WebSocketRoute(ping: …)` works, so only the
+   annotation path is broken.
+
+Also for Phase 3: every message arrives as a **binary** frame — `BodyImpl.read()` is
+`Stream<List<int>>` whatever the payload — so a browser client must set `binaryType`. And
+`lib/protocol.dart` has no `SnapshotFrame`, so `ProtocolFrame.decodeLine` throws on the opening
+frame and a consumer needs one branch before it. For Phase 7: `execute()` awaits `onConnect` fully
+before `listenToMessages()`, so on this revali version the back channel cannot be concurrent with
+server push — two-way is still the right mode, but a steer needs a revali-side change.
 
 **Phase 3 — the UI.** Jaspr over SSE. Live tree, `current task | since | next check-in`.
 

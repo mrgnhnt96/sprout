@@ -17,10 +17,50 @@ are quoted in the entry.
 
 ## Open
 
-**None.** Printed rather than left blank, for the same reason `holds nothing` and `NONE SCHEDULED`
-are printed one layer down: a section that vanishes when it is empty cannot be told apart from a
-section somebody forgot to write. F-04 was the last entry and was closed by
-`lib/protocol.dart`'s `SnapshotFrame` — see `git log` for the commit that deleted it.
+### F-07 — `package:sproutd/protocol.dart` cannot be compiled for the web, and says so silently
+
+**Status: BLOCKING P3-04.** Found by P3-02. The fix is in `sproutd/lib/`, which P3-02 does not own.
+
+`docs/01-plan.md` §13 and P3-02's own brief both assume the browser client will import
+`package:sproutd/protocol.dart` rather than carry a second copy of the wire format — correctly,
+because two independent derivations that must stay equal is what F-01 was. That import does not
+compile for the web today. Observed by building it, not read:
+
+    Skipping compiling sprout_ui|web/main.client.dart with ddc because some of its
+    transitive libraries have sdk dependencies that are not supported on this platform:
+
+    ... -> package:sproutd/protocol.dart -> package:sproutd/src/protocol/frame.dart
+        -> package:sproutd/store.dart -> package:sproutd/src/store/sprout_store.dart
+        (which imports dart:io)
+    ... -> package:sproutd/store.dart -> package:sproutd/src/store/schema.dart
+        -> package:sqlite3/sqlite3.dart -> ... (which imports dart:ffi)
+
+The brief predicted that an *unused* transitive dependency would not be compiled. That reasoning
+does not apply: `frame.dart` genuinely imports `store.dart` for `SproutEvent` and `SproutNode`, and
+`store.dart` re-exports `sprout_store.dart` and `schema.dart` in the same library. The rejection is
+made on the **library import graph**, before any tree-shaking, so an unused symbol does not help.
+
+**The dangerous half is the reporting.** This is a WARNING, not an error. `jaspr build` prints
+`Completed building project`, exits **0**, writes `index.html` and `main.css`, and writes **no**
+`main.client.dart.js` — leaving a page whose one `<script>` 404s. A pipeline that gates on the exit
+code sees a clean build of a UI that cannot run. Note the dependency alone is harmless: declared
+and unimported, the payload builds fine. It is reaching `protocol.dart` from an import that breaks
+it.
+
+`sprout_ui/test/payload_test.dart` is the check that survives this: it asserts the bundle exists,
+is non-empty, and contains this app's own strings. Measured against the failure above, four of its
+five tests fail while `jaspr build` reports success.
+
+**Smallest fix that keeps one definition** (not applied — it is sproutd's to make): lift
+`lib/protocol.dart`, `lib/src/protocol/`, and the pure-value types `protocol` needs out of
+`lib/store.dart` (`SproutEvent`, `SproutNode`, `NodeStatus`, `TreeNode`) into a third package
+depending on neither `dart:io` nor `dart:ffi`, which both `sproutd` and `sprout_ui` then depend on.
+The split point is `sprout_store.dart` and `schema.dart` — the two files that reach the outside
+world — and nothing in `src/protocol/` needs either.
+
+**Do not resolve this by copying the decoder into `sprout_ui`.** That is F-01 again, and it would
+be invisible: two decoders that agree today, in different packages, with no test that compares
+them.
 
 ---
 
@@ -28,6 +68,23 @@ section somebody forgot to write. F-04 was the last entry and was closed by
 
 These are true, cost nothing to know, and would cost real time to rediscover.
 
+- **`jaspr create` scaffolds a project that does not resolve.** Its template pins
+  `build_web_compilers: ^4.8.10`, which wants `analyzer >=13.3.0`, while `jaspr_builder 0.23.4`
+  wants `analyzer ^12.1.0`. `sprout_ui/pubspec.yaml` holds `build_web_compilers` to
+  `">=4.8.0 <4.8.6"` and `scaffold_test.dart` asserts the bound, because a caret would float
+  silently past it. Raise it only together with `jaspr_builder`. (P3-02)
+- **The `revali`/`jaspr_builder` clash is on `analyzer` directly, not via `dart_style`.** Resolving
+  one package declaring both: *"revali >=2.1.0 depends on analyzer ^10.0.0 and jaspr_builder
+  >=0.23.2 depends on analyzer ^12.1.0"*. `docs/01-plan.md` §13 and `sproutd/pubspec.yaml`'s comment
+  name a `dart_style` pin, which is one hop further out than what pub reports. The conflict is real
+  either way and two packages is still the fix — and it only works because `revali` is a **dev**
+  dependency of sproutd: a path dependency pulls a package's regular dependencies, never its dev
+  ones. (P3-02)
+- **`jaspr build` writes 4.4 MB of `build/jaspr/packages/` that is not the payload** — analyzer
+  `fix_data`, win32 fix templates, the `test` runner's browser host — pulled in by *dev*
+  dependencies. The payload is the three top-level files (`index.html`, `main.css`,
+  `main.client.dart.js`). P3-03's rsync step must take the top level only, or the binary carries
+  all of it. `payload_test.dart` asserts both halves. (P3-02)
 - **Every WebSocket message arrives as a *binary* frame**, never text — `BodyImpl.read()` is
   `Stream<List<int>>` whatever the payload type. Phase 3's browser client must set `binaryType`
   and decode. (P2-05)

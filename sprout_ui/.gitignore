@@ -1,0 +1,13 @@
+# pubspec.lock IS committed, same reason as sproutd's: "the build resolves" is
+# only a check if the lockfile is in the tree.
+.dart_tool/
+
+# `jaspr build` output. Rebuilt by CI and rsync'd into sproutd at package time;
+# never a source of truth in git.
+build/
+
+# Written into lib/ by jaspr_builder on every build, regenerated from nothing
+# but the pubspec, and unreferenced — main.client.dart does not call
+# Jaspr.initializeApp. A generated file in the source tree is the hazard
+# .game_loop/verify.yaml opens with; this one has no reason to be there.
+lib/*.client.options.dart

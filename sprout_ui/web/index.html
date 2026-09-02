@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+        <title>sprout</title>
+
+        <!-- Emitted by jaspr_builder from the @css getters in lib/. -->
+        <link rel="stylesheet" href="main.css">
+
+        <!--
+          The compiled lib/main.client.dart. `scaffold_test.dart` asserts this
+          exact filename against the entrypoint, and `payload_test.dart`
+          asserts the build actually produced it: build_web_compilers SKIPS an
+          entrypoint whose import graph reaches an unsupported dart: library
+          and still exits 0, so a missing bundle here is silent.
+        -->
+        <script defer src="main.client.dart.js"></script>
+    </head>
+    <body>
+        <!-- runApp attaches the App component here. -->
+    </body>
+</html>

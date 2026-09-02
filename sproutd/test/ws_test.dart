@@ -41,6 +41,18 @@ const String foreignCursor = 's1.deadbeefdeadbeef.3';
 /// A value that is not a cursor at all.
 const String malformedCursor = 'not-a-cursor';
 
+/// The size of the chunk the transport cuts a frame into, in bytes.
+///
+/// Not a knob and not a guess: `dart:convert`'s `_Utf8Encoder` allocates
+/// `_DEFAULT_BYTE_BUFFER_SIZE = 1024` (Dart SDK 3.13, `lib/convert/utf.dart`)
+/// and flushes whenever it fills, and `StreamBodyData.read()` encodes the
+/// socket's `Stream<String>` through exactly that. So a frame past this many
+/// bytes reaches `webSocket.add` as more than one call and arrives as more
+/// than one message — which is what `a frame larger than one chunk` builds a
+/// frame to cross. `sprout_ui/lib/src/frame_reader.dart` spells the same
+/// number for the same reason on the reading side.
+const int daemonChunkBytes = 1024;
+
 /// The ping the test sockets use, shortened from `socketPingInterval`.
 ///
 /// It is what makes a disconnect observable at all, so a test that wants to
@@ -582,10 +594,14 @@ void main() {
     late _Wire wire;
     tearDown(() => wire.close());
 
-    test('is NDJSON, one frame per message, with no envelope', () async {
+    test('is NDJSON, one frame per LINE, with no envelope', () async {
       // `sprout watch --json` writes exactly these lines. A `{"data": …}`
       // wrapper — Revali's default for a Map return — would mean the two
       // surfaces need two decoders for one protocol.
+      //
+      // Per line and not per message: `_Wire` cuts at the newline the
+      // transport now writes, and `a frame larger than one chunk` is what
+      // proves the two are different things.
       wire = await _serve();
       final first = await wire.next();
       expect(first, isNot(contains('"data":')));
@@ -593,7 +609,104 @@ void main() {
 
       wire.heartbeats.add(null);
       final beat = await wire.next();
+      // `encodeLine()` carries no trailing newline and neither does a line
+      // `_Wire` has cut, so the round trip is byte-for-byte. The delimiter
+      // belongs to the transport, not to the encoder: putting it in
+      // `encodeLine` would make `sprout watch --json` — which writes these
+      // with `writeln` — emit a blank line between every frame.
       expect(ProtocolFrame.decodeLine(beat).encodeLine(), beat);
+    });
+
+    test('every frame ends with a newline, so a consumer can split', () async {
+      // The delimiter itself, asserted at the byte level rather than inferred
+      // from `_Wire` having produced frames. `pendingBytes` is what a client
+      // is still holding: zero after a frame means the frame was terminated,
+      // not merely started.
+      wire = await _serve();
+      await wire.skipToReady();
+      wire.heartbeats.add(null);
+      await wire.next();
+      await _until(() => wire.pendingBytes == 0);
+      expect(
+        wire.pendingBytes,
+        0,
+        reason: 'a frame the transport finished leaves nothing buffered',
+      );
+    });
+
+    test('a frame larger than one chunk still arrives whole', () async {
+      // **The test that was missing, and its absence is why F-09 survived two
+      // phases.** Every other frame these tests build is under a kilobyte, so
+      // reading one message as one frame worked by luck.
+      //
+      // `dart:convert`'s utf8 encoder flushes a 1024-byte buffer, so a frame
+      // past that is chopped into several WebSocket messages before it ever
+      // reaches `webSocket.add`. The newline does not stop that and is not
+      // supposed to: what it does is make the pieces reassemblable. So this
+      // asserts BOTH halves — that the frame really was split (otherwise the
+      // test proves nothing), and that splitting on `\n` recovered it whole,
+      // byte for byte, including the frames on either side of it.
+      const filler = 'lorem ipsum dolor sit amet — a payload that will not fit';
+      final long = List.generate(80, (i) => '$i:$filler').join(' ');
+      wire = await _serve(
+        seed: (store) => store.putNode(
+          SproutNode(
+            id: 'big',
+            project: '/p',
+            status: NodeStatus.working,
+            currentTask: long,
+          ),
+        ),
+      );
+
+      final snapshot = await wire.next();
+      expect(
+        snapshot.length,
+        greaterThan(daemonChunkBytes),
+        reason: 'the point of this test is a frame past one encoder buffer',
+      );
+      expect(
+        wire.messages,
+        greaterThan(1),
+        reason: 'and it must really have been chopped, or nothing is proved',
+      );
+      expect(wire.largestMessage, lessThanOrEqualTo(daemonChunkBytes));
+
+      // Recovered whole: the long task survives, and the frame round-trips.
+      final frame = ProtocolFrame.decodeLine(snapshot) as SnapshotFrame;
+      expect(frame.snapshot.nodes.single.node.currentTask, long);
+      expect(frame.encodeLine(), snapshot);
+
+      // And the stream did not lose its place: the frames after the big one
+      // are still whole, which is what a missing delimiter would break.
+      expect(ProtocolFrame.decodeLine(await wire.next()), isA<ReadyFrame>());
+      wire.heartbeats.add(null);
+      expect(
+        ProtocolFrame.decodeLine(await wire.next()),
+        isA<HeartbeatFrame>(),
+      );
+      expect(wire.pendingBytes, 0);
+    });
+
+    test('a splitter that swallows everything is not a reader', () {
+      // The paired negative (INV8). Newline-splitting makes reassembly easy,
+      // and the easy mistake is a reader that treats every line it cannot
+      // parse as nothing at all — which renders an empty tree and looks
+      // healthy. A complete line that is not a frame must still throw.
+      expect(
+        () => ProtocolFrame.decodeLine('{"type":"delta"'),
+        throwsA(isA<Object>()),
+        reason: 'truncated JSON is not an empty frame',
+      );
+      expect(
+        () => ProtocolFrame.decodeLine('not json at all'),
+        throwsA(isA<Object>()),
+      );
+      expect(
+        () => ProtocolFrame.decodeLine('{"type":"nonsense"}'),
+        throwsA(isA<ProtocolFormatException>()),
+        reason: 'well-formed JSON that is not a frame is still a failure',
+      );
     });
 
     test('carries the snapshot fields that must survive compression', () async {
@@ -1146,6 +1259,21 @@ final class _Silent {
 }
 
 /// One connected client and everything the test needs to drive it.
+///
+/// **It reassembles, because a real consumer has to.** This used to treat each
+/// WebSocket message as one frame, and every test passed because every frame
+/// these tests build is smaller than the 1024-byte chunk `dart:convert`'s utf8
+/// encoder flushes at — which is exactly the blind spot that let finding F-09
+/// live through two phases. It now does what a browser must: append every
+/// message's bytes to one buffer and cut at each `\n`. So `received` holds
+/// whole frames whatever the daemon's chunking did, and
+/// `a frame larger than one chunk` below proves it on a payload big enough to
+/// be split.
+///
+/// It buffers rather than decoding per message on purpose: a partial line at
+/// the end of a message is normal and must wait, while a *complete* line that
+/// is not JSON is a real protocol break — see
+/// `a splitter that swallows everything is not a reader`.
 final class _Wire {
   _Wire({required this.bound, required this.socket, required this.timeout}) {
     _subscription = socket.listen(
@@ -1157,7 +1285,10 @@ final class _Wire {
         // assumed, because a browser client has to set `binaryType` and decode
         // for itself — Phase 3 inherits this.
         expect(message, isA<List<int>>());
-        received.add(utf8.decode(message as List<int>));
+        final bytes = message as List<int>;
+        messages++;
+        if (bytes.length > largestMessage) largestMessage = bytes.length;
+        _feed(bytes);
         _serve();
       },
       onDone: () {
@@ -1181,14 +1312,54 @@ final class _Wire {
   /// See [_Bound.handlerCalls].
   int get handlerCalls => bound.handlerCalls();
 
-  /// Every message the client has received, in order.
+  /// Every whole frame the client has read, in order, without its newline.
+  ///
+  /// Frames, not messages: see the note on this class. The delimiter is
+  /// stripped so these compare equal to `ProtocolFrame.encodeLine()`, which is
+  /// what the CLI writes and what every assertion here is phrased against.
   final List<String> received = [];
+
+  /// How many WebSocket messages arrived, whatever they carried.
+  ///
+  /// Kept beside [received] because the two differing is the finding: a frame
+  /// can span messages and small frames can share one.
+  int messages = 0;
+
+  /// The largest single message, in bytes. Never exceeds 1024 in practice.
+  int largestMessage = 0;
 
   late final StreamSubscription<dynamic> _subscription;
   final List<Completer<String>> _waiting = [];
+  final List<int> _buffer = [];
   int _taken = 0;
   bool _closed = false;
   bool _disposed = false;
+
+  /// Bytes not yet followed by a newline — a frame still arriving.
+  int get pendingBytes => _buffer.length;
+
+  /// Buffers [bytes] and completes every whole line they finish.
+  ///
+  /// A line that is not a JSON object is thrown rather than skipped: a
+  /// splitter that quietly drops what it cannot read reports a quiet tree,
+  /// which is INV8 and the failure this protocol exists to remove.
+  void _feed(List<int> bytes) {
+    _buffer.addAll(bytes);
+    var cut = _buffer.indexOf(0x0A);
+    while (cut != -1) {
+      final line = utf8.decode(_buffer.sublist(0, cut));
+      _buffer.removeRange(0, cut + 1);
+      if (line.isNotEmpty) {
+        expect(
+          jsonDecode(line),
+          isA<Map<String, Object?>>(),
+          reason: 'a delimited line must be one whole frame: $line',
+        );
+        received.add(line);
+      }
+      cut = _buffer.indexOf(0x0A);
+    }
+  }
 
   /// The next message, or a test failure if the socket closes or goes quiet.
   ///

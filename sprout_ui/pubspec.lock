@@ -673,6 +673,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.10.2"
+  sprout_protocol:
+    dependency: "direct main"
+    description:
+      path: "../sprout_protocol"
+      relative: true
+    source: path
+    version: "0.1.0"
   sse:
     dependency: transitive
     description:

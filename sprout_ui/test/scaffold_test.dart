@@ -100,14 +100,16 @@ void main() {
       );
     });
 
-    test('sprout_ui does not depend on sproutd', () {
-      // Reversing this is the obvious next move — P3-04 needs the protocol
-      // decoder that `package:sproutd/protocol.dart` already defines, and
-      // duplicating it here would be the F-01 bug again. It does not work
-      // today, and the failure is SILENT: `protocol.dart` re-exports
-      // `store.dart`, which reaches dart:io and package:sqlite3's dart:ffi,
-      // so build_web_compilers skips the entrypoint, emits no
-      // main.client.dart.js, and `jaspr build` still exits 0.
+    test('sprout_ui does not depend on sproutd, at any remove', () {
+      // This was finding F-07 and it stays guarded after the repair, because
+      // the repair made the wrong thing importable rather than impossible.
+      // `package:sproutd/protocol.dart` still exists — it re-exports
+      // sprout_protocol so the daemon's own importers keep working — and it
+      // still reaches dart:io and package:sqlite3's dart:ffi through
+      // `store.dart`. Reaching it from here breaks the web build SILENTLY:
+      // build_web_compilers skips the entrypoint, emits no
+      // main.client.dart.js, and `jaspr build` exits 0 having printed
+      // `Completed building project`.
       //
       // Precisely: the DEPENDENCY alone is harmless — measured, the payload
       // builds fine with it declared and unused. What breaks the build is an
@@ -115,8 +117,6 @@ void main() {
       // anyway, because it is the only cheap thing to guard: an import cannot
       // exist without it, and the failure it prevents is invisible.
       //
-      // Removing this needs the protocol types lifted out of sproutd first,
-      // into a package that reaches neither dart:io nor dart:ffi.
       // Matched as a dependency DECLARATION, not as a substring: this
       // pubspec's own comments name sproutd repeatedly, and a plain
       // `contains` would fail on the explanation of why the dep is absent.
@@ -126,8 +126,75 @@ void main() {
         reason: 'sprout_ui declares a dependency on sproutd',
       );
       // And the paired check on what pub actually resolved, so a transitive
-      // route in is caught too.
+      // route in is caught too — including one arriving through
+      // sprout_protocol, which is a package in this repo and so is exactly the
+      // kind of thing a later change could point back at sproutd.
       expect(lockedVersion(lock, 'sproutd'), isNull);
+    });
+
+    test('it depends on sprout_protocol instead, by path', () {
+      // The positive half. Without it the test above passes vacuously the day
+      // somebody solves F-07 by copying the decoder into this package — which
+      // is finding F-01 again, two derivations that must stay equal, agreeing
+      // on the day they are written with no test that compares them.
+      expect(
+        RegExp(
+          r'^  sprout_protocol:\n    path: \.\./sprout_protocol$',
+          multiLine: true,
+        ).hasMatch(pubspec),
+        isTrue,
+        reason: 'sprout_ui must take the wire format from sprout_protocol',
+      );
+      expect(
+        File('../sprout_protocol/lib/protocol.dart').existsSync(),
+        isTrue,
+        reason: '../sprout_protocol is gone',
+      );
+    });
+
+    test('and the app really imports it, so the build is really exercised', () {
+      // `payload_test.dart` proves the bundle builds. It proves nothing about
+      // F-07 unless something in this package actually reaches the protocol:
+      // measured, the DEPENDENCY alone built fine even before the split. The
+      // import is what the failure needs, so the import is what has to exist
+      // for the payload test to mean anything.
+      final app = File('lib/app.dart').readAsStringSync();
+      expect(
+        app,
+        contains("import 'package:sprout_protocol/protocol.dart';"),
+        reason:
+            'nothing here imports the protocol, so payload_test.dart is no '
+            'longer a check on F-07 — it would pass with the split undone',
+      );
+      expect(app, contains('ProtocolFrame'));
+    });
+
+    test('nothing sprout_protocol offers reaches dart:io or dart:ffi', () {
+      // The invariant the whole split exists to create, asserted at the source
+      // rather than inferred from a green build — because the build's way of
+      // reporting this failure is to succeed.
+      //
+      // sproutd's own scaffold_test.dart asserts the same thing. Two packages
+      // assert it because two packages would break from it, and each of them
+      // is gated by a different rule in .game_loop/verify.yaml.
+      final banned = RegExp(
+        r"import 'dart:(io|ffi|mirrors|isolate)'|package:sqlite3",
+      );
+      final offenders = Directory('../sprout_protocol/lib')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart'))
+          .where((f) => banned.hasMatch(f.readAsStringSync()))
+          .map((f) => f.path)
+          .toList();
+      expect(
+        offenders,
+        isEmpty,
+        reason:
+            'sprout_protocol is compiled for the browser. A library that '
+            'reaches one of these makes build_web_compilers skip the '
+            'entrypoint, with a WARNING and an exit code of 0.',
+      );
     });
   });
 

@@ -24,6 +24,14 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// This is a registry, not a ceiling: a phase that adds an area adds its name
 /// here in the same change. `protocol` is Phase 2's, and the wire vocabulary
 /// of `snapshot` / `watch --since <cursor>` lives in it.
+///
+/// The set did **not** change when P3-05 lifted the protocol into
+/// `package:sprout_protocol`. `lib/protocol.dart` is still here and still
+/// means the same thing to an importer — it re-exports rather than
+/// re-declares, which is what keeps `bin/sprout.dart`,
+/// `routes/controllers/tree_controller.dart`, `lib/snapshot.dart`,
+/// `lib/watch.dart` and every test reading one set of declarations instead of
+/// two that agree today. See [reExportedWholesale].
 const libraries = {
   'store',
   'stream',
@@ -32,6 +40,20 @@ const libraries = {
   'protocol',
   'snapshot',
   'watch',
+};
+
+/// The libraries whose declarations now live in `package:sprout_protocol`.
+///
+/// Each maps a path under `lib/` to the export line that has to be in it. The
+/// pure-value half of sprout was lifted out so the browser could decode the
+/// frames the daemon emits — `package:sproutd/protocol.dart` reached dart:io
+/// and package:sqlite3's dart:ffi through `store.dart`, and
+/// build_web_compilers refuses an entrypoint on its transitive library import
+/// graph. That was finding F-07.
+const reExportedWholesale = {
+  'lib/protocol.dart': "export 'package:sprout_protocol/protocol.dart';",
+  'lib/snapshot.dart': "export 'package:sprout_protocol/snapshot.dart';",
+  'lib/store.dart': "export 'package:sprout_protocol/values.dart'",
 };
 
 /// Reads the resolved version of [package] out of `pubspec.lock`.
@@ -92,6 +114,79 @@ void main() {
       // The positive half of this pair is what keeps the negative honest.
       expect(lockedVersion(lock, 'revali'), isNotNull);
       expect(lockedVersion(lock, 'revali_server'), isNull);
+    });
+  });
+
+  group('the sprout_protocol split', () {
+    // P3-05, closing finding F-07.
+    test('sproutd depends on sprout_protocol by path', () {
+      expect(
+        RegExp(
+          r'^  sprout_protocol:\n    path: \.\./sprout_protocol$',
+          multiLine: true,
+        ).hasMatch(pubspec),
+        isTrue,
+      );
+      // A path dependency resolves to no version, so `lockedVersion` cannot
+      // speak for it. What the lock does record is that pub saw it at all.
+      expect(lock, contains('\n  sprout_protocol:\n'));
+    });
+
+    test('the old import paths still work and are re-exports', () {
+      // The compatibility promise, asserted as text because the rest of this
+      // suite asserts it by USE: every other test file here imports
+      // `package:sproutd/protocol.dart` and `package:sproutd/store.dart` and
+      // would fail to compile if these shims stopped carrying the types.
+      //
+      // Text as well as use, because a shim could be replaced by a second
+      // DECLARATION of the same types and every one of those tests would keep
+      // passing — right up until the two copies drifted. That is finding F-01,
+      // and it is the one failure a green suite cannot see.
+      for (final MapEntry(key: path, value: line)
+          in reExportedWholesale.entries) {
+        final file = File(path);
+        expect(file.existsSync(), isTrue, reason: '$path is missing');
+        expect(
+          file.readAsStringSync(),
+          contains(line),
+          reason: '$path must re-export from sprout_protocol, not redeclare',
+        );
+      }
+    });
+
+    test('nothing sprout_protocol offers reaches dart:io or dart:ffi', () {
+      // The invariant that makes the browser build possible, asserted at the
+      // source. It is asserted here as well as in sprout_ui because the two
+      // packages are gated by different rules in .game_loop/verify.yaml, and
+      // because the failure it prevents is a SILENT one: build_web_compilers
+      // skips the entrypoint with a WARNING and `jaspr build` still exits 0.
+      final banned = RegExp(
+        r"import 'dart:(io|ffi|mirrors|isolate)'|package:sqlite3",
+      );
+      final offenders = Directory('../sprout_protocol/lib')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart'))
+          .where((f) => banned.hasMatch(f.readAsStringSync()))
+          .map((f) => f.path)
+          .toList();
+      expect(offenders, isEmpty);
+    });
+
+    test('and it declares no dependencies at all', () {
+      // The stronger form of the test above, and the reason it is not
+      // redundant: a banned import can arrive through a package rather than
+      // through a `dart:` URI, and nothing in sprout_protocol's own source
+      // would show it. Every dependency added there is compiled into the
+      // browser bundle, so each one has to be a decision.
+      final theirs = File('../sprout_protocol/pubspec.yaml').readAsStringSync();
+      expect(
+        RegExp(r'^dependencies:', multiLine: true).hasMatch(theirs),
+        isFalse,
+        reason:
+            'sprout_protocol took a dependency. It is compiled for the web; '
+            'check the new one is too, then relax this test on purpose.',
+      );
     });
   });
 

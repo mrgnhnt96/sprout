@@ -1,11 +1,10 @@
+import 'package:sprout_protocol/snapshot.dart';
+
 import '../../policy.dart';
 import '../../protocol.dart';
 import '../../runner.dart';
 import '../../store.dart';
-import 'resource.dart';
-import 'snapshot.dart';
 import 'source.dart';
-import 'spend.dart';
 
 /// The event kind a dollar figure arrives on.
 ///

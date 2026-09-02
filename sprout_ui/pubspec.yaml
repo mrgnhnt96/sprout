@@ -30,6 +30,19 @@ dependencies:
   # Pinned exactly, like sproutd's stack: docs/01-plan.md §13 records 0.23.4 as
   # the version the payload pipeline was executed against.
   jaspr: 0.23.4
+  # ONE definition of the wire format, compiled twice. sproutd emits these
+  # frames and this package decodes them; a second decoder here would be
+  # finding F-01 again — two derivations that must stay equal, agreeing on the
+  # day they are written, with no test that compares them.
+  #
+  # It is `sprout_protocol` and NOT `sproutd` because build_web_compilers
+  # rejects an entrypoint on its transitive LIBRARY IMPORT GRAPH:
+  # `package:sproutd/protocol.dart` reaches dart:io and package:sqlite3's
+  # dart:ffi through `store.dart`, and the rejection is a WARNING that leaves
+  # `jaspr build` exiting 0 with no `main.client.dart.js` written. That was
+  # F-07. `test/payload_test.dart` is what makes it loud.
+  sprout_protocol:
+    path: ../sprout_protocol
 
 dev_dependencies:
   # Pinned: emits the client bundle, and it is half of the conflict above.

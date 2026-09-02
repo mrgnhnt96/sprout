@@ -1,0 +1,67 @@
+name: sprout_protocol
+description: >-
+  The pure-value half of sprout: the wire vocabulary of `snapshot` and
+  `watch --since <cursor>`, and the types those frames carry. Depends on
+  nothing but the Dart SDK, and reaches neither dart:io nor dart:ffi, so it
+  compiles for the browser.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+# WHY THIS PACKAGE EXISTS, AND WHY IT MUST STAY EMPTY OF DEPENDENCIES.
+#
+# It was finding F-07. `package:sproutd/protocol.dart` re-exported
+# `lib/src/protocol/frame.dart`, which imported `lib/store.dart` for
+# `SproutEvent` and `SproutNode` — and `store.dart` exports
+# `src/store/sprout_store.dart` (dart:io) and `src/store/schema.dart`
+# (package:sqlite3, and so dart:ffi) from the same library. Observed, not read:
+#
+#   Skipping compiling sprout_ui|web/main.client.dart with ddc because some of
+#   its transitive libraries have sdk dependencies that are not supported on
+#   this platform
+#
+# build_web_compilers decides that on the LIBRARY IMPORT GRAPH, before any
+# tree-shaking, so the browser never calling `SproutStore` did not help.
+#
+# The dangerous half was the reporting. That is a WARNING: `jaspr build` printed
+# `Completed building project`, exited 0, wrote `index.html` and `main.css`, and
+# wrote no `main.client.dart.js` — a green build of a page whose one <script>
+# 404s. Measured before the split, 4 of sprout_ui's 5 payload tests failed while
+# the build reported success.
+#
+# So the rule this package encodes: ANY dependency added here has to be
+# web-safe, because sprout_ui compiles it and the failure mode is a silent
+# success. `sproutd/test/scaffold_test.dart` and `sprout_ui/test/scaffold_test.dart`
+# both assert the absence of dart:io / dart:ffi / sqlite3 from this lib/, and
+# sprout_ui's `dart test` runs a real `jaspr build` and asserts the emitted
+# bundle is non-empty. That last one is the check the warning cannot walk past.
+#
+# The alternative — copying the decoder into sprout_ui — was rejected as a
+# repeat of F-01: two derivations that must stay equal, agreeing on the day they
+# are written, with no test that compares them.
+
+# NO TEST DEPENDENCY, AND NO `test/` DIRECTORY, ON PURPOSE.
+#
+# The protocol's tests are `sproutd/test/protocol_test.dart` and
+# `sproutd/test/snapshot_test.dart`, and they stayed in sproutd when the code
+# moved out. Two reasons, and the second is the one that decided it:
+#
+#  - sproutd depends on this package by path, so `cd sproutd && dart test`
+#    compiles and exercises every line of it. Those tests also import through
+#    `package:sproutd/protocol.dart`, which means they check the re-export
+#    shims keep working for the daemon at the same time.
+#  - the commands that decide whether a change is good in this repo are
+#    `.showrunner/config.json` -> checks and `.game_loop/verify.yaml`, and both
+#    of them today name only sproutd and sprout_ui. A suite moved here would
+#    have left the gate, which is the one thing worth more than tidy layout.
+#
+# **`.game_loop/verify.yaml` still owes this package a rule** — that file is
+# write-guarded and was not this leaf's to edit. Until one lands, a change
+# confined to `sprout_protocol/**` is UNCHECKED: measured, `cd sproutd &&
+# dart analyze --fatal-infos` does not analyze these sources, and neither does
+# sprout_ui's. The rule this package wants is in P3-05's close reason.
+
+dev_dependencies:
+  lints: ^6.0.0

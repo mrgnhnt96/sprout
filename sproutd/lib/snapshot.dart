@@ -35,22 +35,21 @@
 /// including a subtree whose spend nobody reported: [SubtreeSpend] answers
 /// `spend ?` and never `$0.00`.
 ///
-/// Implementation lives under `lib/src/snapshot/`.
+/// **The snapshot splits in two, and the seam is `dart:io`.** The *values* —
+/// [SproutSnapshot], [SnapshotNode], [HeldResource], [SubtreeSpend] and the
+/// renderings above — live in `package:sprout_protocol/snapshot.dart` and are
+/// re-exported here, because [SnapshotFrame] carries a snapshot and the
+/// browser therefore has to decode one (finding F-07). What is left in this
+/// package is the half that *reads a store*: [SnapshotSource] and
+/// [takeSnapshot]. Importers of `package:sproutd/snapshot.dart` see no
+/// difference; the same declarations arrive from the same path.
+///
+/// Implementation lives under `lib/src/snapshot/`, and under
+/// `sprout_protocol/lib/src/snapshot/` for the pure half.
 library;
 
-export 'src/snapshot/resource.dart'
-    show HeldResource, heldResourcesOf, isHoldingStatus, nothingHeldText;
-export 'src/snapshot/snapshot.dart'
-    show
-        SnapshotNode,
-        SproutSnapshot,
-        formatAge,
-        formatClock,
-        journalReadableText,
-        journalUnreadableKey,
-        noNodesText;
+export 'package:sprout_protocol/snapshot.dart';
+
 export 'src/snapshot/source.dart' show SnapshotSource, StoreSnapshotSource;
-export 'src/snapshot/spend.dart'
-    show SubtreeSpend, noCheckinText, unknownValueText;
 export 'src/snapshot/take.dart'
     show resultEventKind, takeSnapshot, totalCostUsdField;

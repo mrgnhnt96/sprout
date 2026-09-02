@@ -1,6 +1,8 @@
 /// Deciding live / stalled / abandoned over the whole node graph at once.
 library;
 
+import 'package:sprout_protocol/values.dart';
+
 import '../../store.dart';
 import 'process_probe.dart';
 import 'transcript.dart';
@@ -43,23 +45,15 @@ const Set<NodeStatus> endedStatuses = {
   NodeStatus.parked,
 };
 
-/// The `kind` `SessionRunner` writes when a process actually started.
-///
-/// Spelled here as well as in `session_runner.dart:173`, which is a second
-/// declaration of one string and therefore F-11's hazard. It is not lifted into
-/// `sprout_protocol` from this leaf because that file belongs to another leaf's
-/// file set; `liveness_test.dart` reads `session_runner.dart` and asserts the
-/// two still agree, so a rename fails instead of silently making every node
-/// abandoned. Recorded as F-12 in `docs/02-open-findings.md`.
-const String runnerSpawnedKind = 'runner.spawned';
-
-/// The `kind` written when the containment gate refused the launch
-/// (`session_runner.dart:135`). See [runnerSpawnedKind] on the duplication.
-const String runnerRefusedKind = 'runner.refused';
-
-/// The `kind` written when the process could not be started at all
-/// (`session_runner.dart:164`). See [runnerSpawnedKind] on the duplication.
-const String runnerLaunchFailedKind = 'runner.launch_failed';
+// The three `runner.*` kinds this library reads — [runnerSpawnedKind],
+// [runnerRefusedKind] and [runnerLaunchFailedKind] — were once declared here
+// as well as at the runner's call sites, which was two derivations of one
+// string and so F-01's shape. They are imported from
+// `package:sprout_protocol/values.dart` now, where the runner writes them
+// from: producer and reader read one declaration, and a rename is a compile
+// error rather than something a test has to notice. That was F-12.
+// `lib/liveness.dart` re-exports them, so nothing that imported them from
+// here had to move.
 
 /// Measures `docs/01-plan.md` §5's three liveness verdicts over a store.
 ///

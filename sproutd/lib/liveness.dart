@@ -44,15 +44,19 @@
 /// and §11.
 library;
 
+// The three kinds this library reads are declared in
+// `package:sprout_protocol/values.dart` (F-12), beside the values they label
+// and where the runner writes them from. Re-exported here so every importer
+// that got them from this library still does.
+export 'package:sprout_protocol/values.dart'
+    show runnerLaunchFailedKind, runnerRefusedKind, runnerSpawnedKind;
+
 export 'src/liveness/measure.dart'
     show
         LivenessMeasure,
         defaultFrozenAfter,
         defaultStartTimeTolerance,
-        endedStatuses,
-        runnerLaunchFailedKind,
-        runnerRefusedKind,
-        runnerSpawnedKind;
+        endedStatuses;
 export 'src/liveness/process_probe.dart'
     show
         ProcessGone,

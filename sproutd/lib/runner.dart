@@ -20,6 +20,22 @@
 /// Implementation lives under `lib/src/runner/`. See `docs/01-plan.md` §5.
 library;
 
+// The `kind` strings this library appends — the four launch and lifecycle
+// events and the one session record — are declared in
+// `package:sprout_protocol/values.dart`, not here. They sit in the `kind`
+// column of a row that travels over the socket to a browser that branches on
+// it, so both ends need one declaration and only one end has a database. That
+// was finding F-12; before it, `lib/src/liveness/measure.dart` had to spell
+// three of them a second time. Re-exported so this library still publishes the
+// vocabulary it writes.
+export 'package:sprout_protocol/values.dart'
+    show
+        runnerExitedKind,
+        runnerLaunchFailedKind,
+        runnerRefusedKind,
+        runnerSessionKind,
+        runnerSpawnedKind;
+
 export 'src/runner/launcher.dart'
     show
         ClaudeLauncher,

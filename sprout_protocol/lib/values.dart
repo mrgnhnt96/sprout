@@ -13,11 +13,20 @@
 /// The event `kind` strings live here too, for the same reason the types do:
 /// the producer writes them into a column that travels over the socket and the
 /// browser branches on what it reads back, so they are wire vocabulary that
-/// both ends need one declaration of. That was finding F-11.
+/// both ends need one declaration of. That was finding F-11 for the two node
+/// kinds and F-12 for the five `runner.*` launch and lifecycle kinds.
 ///
 /// Implementation lives under `lib/src/values/`.
 library;
 
 export 'src/values/event.dart' show SproutEvent;
-export 'src/values/kinds.dart' show nodeObservedKind, nodeUpdatedKind;
+export 'src/values/kinds.dart'
+    show
+        nodeObservedKind,
+        nodeUpdatedKind,
+        runnerExitedKind,
+        runnerLaunchFailedKind,
+        runnerRefusedKind,
+        runnerSessionKind,
+        runnerSpawnedKind;
 export 'src/values/node.dart' show NodeStatus, SproutNode, TreeNode;

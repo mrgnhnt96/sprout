@@ -60,31 +60,72 @@ const String socketClosedReasonPrefix = 'sprout: ';
 
 /// How often the socket asks its peer whether it is still there.
 ///
-/// **Not decoration, and — on this toolchain — not yet in effect.** While
+/// **Not decoration — it is the only thing that ends a session.** While
 /// `runHandler(onConnect)` is streaming, `HandleWebSocket.execute()` has not
 /// reached `listenToMessages()`, so *nobody reads the socket*: an inbound
 /// close frame is never processed, `closeCode` stays null, and
-/// `webSocket.add` keeps succeeding into a peer that has gone. A ping is the
-/// only thing that notices. Measured on a real loopback socket with the same
-/// handler: with no ping the watch session was still subscribed to its signals
-/// twelve seconds after the client hung up and would have stayed that way; at
-/// `ping: 1s` it was torn down in 2219ms, at `500ms` in 1213ms.
+/// `webSocket.add` keeps succeeding into a peer that has gone. The ping is
+/// timer-driven rather than read-driven, so it notices anyway: `dart:io`
+/// closes the socket when a pong does not come back, which unwinds the
+/// handler and cancels both signals with it. Without one, **every client that
+/// hangs up leaks a watch session, its 15s heartbeat and its 250ms poll**, and
+/// nothing ever reclaims them.
 ///
-/// The annotation below asks for it and **revali silently drops it**:
-/// `WebSocketAnnotation.fromAnnotation` (revali_construct 3.0.0) reads
-/// `Duration`'s private `_duration` field, which Dart 3.13.2 does not have —
-/// `lib/core/duration.dart` declares the public `inMicroseconds` instead — so
-/// the read yields null and `create_child_route.dart:48` emits no `ping`
-/// argument. `revali build` succeeds with no warning. Passing the same
-/// `Duration` straight to `WebSocketRoute(ping: …)` works, so only the
-/// annotation path is broken.
+/// Measured out of process against the compiled binary, run from `/`, with a
+/// client SIGKILLed so it sends a TCP FIN and no close frame: with no ping the
+/// daemon still held the connection ESTABLISHED after 60s; with this ping it
+/// closed the connection itself after 31s, one ping to discover the peer is
+/// gone and one to time the missing pong out.
 ///
-/// The consequence, stated plainly because it is a Phase 3 blocker: **every
-/// client that hangs up leaks a watch session and its two timers, and nothing
-/// reclaims them.** `test/ws_test.dart` pins both halves — that the teardown
-/// works when the transport reports the disconnect, and that nothing reports
-/// it through the generated route today.
-const Duration socketPingInterval = Duration(seconds: 15);
+/// The type is the fix, and it is a workaround for a dependency bug rather
+/// than a design: see [PingDuration].
+const PingDuration socketPingInterval = PingDuration(seconds: 15);
+
+/// A [Duration] that survives `revali build`.
+///
+/// This type exists for one reason: to be found by a code generator that is
+/// looking for a field the SDK renamed. `WebSocketAnnotation.fromAnnotation`
+/// (`revali_construct 3.0.0`, `lib/models/web_socket_annotation.dart:29`)
+/// reads the annotated ping as `pingRaw.getField('_duration')` — the private
+/// name `Duration` stored its microseconds under before the SDK made the
+/// value public. That is the *only* read path in the factory; there is no
+/// fallback to `inMicroseconds`. So a plain `Duration` yields null and the
+/// ping is dropped.
+///
+/// A subclass that declares `_duration` itself gives that read something to
+/// find, and the analyzer resolves a field against the object's own class
+/// before walking to `(super)`. Nothing about the runtime changes: revali
+/// re-materialises the value as a plain `Duration(microseconds: …)` when it
+/// emits the route (`revali 3.3.2`,
+/// `lib/server/makers/creators/create_child_route.dart:48`), so what reaches
+/// `WebSocketRoute` is an ordinary `Duration` and this class never appears in
+/// the generated server at all.
+///
+/// **This is a workaround for a bug in a dependency, not a modelling
+/// decision.** The upstream fix is two lines in that factory — read
+/// `inMicroseconds` first and keep `_duration` as a fallback, so the
+/// annotation resolves on either SDK — and it was verified here by building
+/// against a patched `revali_construct` with a plain `Duration`. When a
+/// revali carrying that fix is pinned in `pubspec.yaml`, delete this class
+/// and make [socketPingInterval] a plain `Duration` again. `test/ws_test.dart`
+/// asserts the ping reaches the generated route, so that deletion is checked
+/// rather than remembered.
+final class PingDuration extends Duration {
+  /// A ping of [seconds], stored twice on purpose.
+  ///
+  /// `super` sets the SDK's `inMicroseconds`, which is what every consumer
+  /// reads at runtime, and [_duration] is the same number under the name the
+  /// generator asks for. [inMicroseconds] is overridden to return [_duration]
+  /// so the two cannot drift apart and the field is not dead weight.
+  const PingDuration({required super.seconds})
+    : _duration = seconds * Duration.microsecondsPerSecond;
+
+  /// The microseconds, under the name `revali_construct` reads.
+  final int _duration;
+
+  @override
+  int get inMicroseconds => _duration;
+}
 
 /// Serves the tree: a snapshot over HTTP, and snapshot-then-watch over a
 /// socket.

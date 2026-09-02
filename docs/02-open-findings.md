@@ -68,6 +68,38 @@ the grant, and produced the log entry. Same file, same content, same session, sa
 interpreter path is unguarded and the shell path is guarded. That is the gap in one pair of runs,
 and it is why the remedy has to be detection on the file rather than more parsing of the command.
 
+### F-14 — Two independent hook-payload parsers now exist, and they agree by coincidence
+
+**Status: OPEN, and it is P8-02's to close** — that is the leaf which will need one of them and is
+the first that can pick without guessing.
+
+P8-01 added `HookPayload` in `sproutd/lib/src/hooks/payload.dart`, the general parser for every hook
+event. `UserPromptSubmitPayload` in `sproutd/lib/src/stream/prompt.dart` was already there, added
+earlier for one event, and it is also a hook-payload parser — its own doc comment says so. The two
+independently declare **six of the same accessors over the same wire fields**: `session_id`,
+`prompt_id`, `cwd`, `permission_mode`, `transcript_path`, `prompt`.
+
+That is F-01's shape and F-11's exactly: two derivations of one fact, equal today, with nothing that
+fails when they stop being equal. Neither file imports the other, so a field that changes spelling
+gets fixed in whichever one the next reader happens to open.
+
+**The repair is small and obvious**, which is part of why it should be done deliberately rather than
+in passing: `UserPromptSubmitPayload` becomes a `HookPayload` — it already needs nothing the general
+class does not have — and keeps only what is genuinely its own, which is `origin`,
+`isMachineTraffic` and `taskNotification`, the `<task-notification>` classification that is the
+reason it exists at all. `stream.dart` keeps exporting the name, so no importer moves.
+
+**Why it was not fixed by P8-01.** `lib/src/stream/prompt.dart` and `lib/stream.dart` are the stream
+leaf's files, not this one's, and siblings were working other leaves in the same tree. P8-01 also
+had no consumer to prove the merged shape against — it writes nothing. P8-02 will have one.
+
+**What is NOT wrong here.** The two parsers do not disagree; every shared accessor reads the same
+key with the same null-on-wrong-type discipline, and the `agent_id`-based derivations that this
+leaf's tests actually pin are declared once. This is a hazard that has not fired, reported before it
+does.
+
+---
+
 ### F-13 — `sprout_protocol/pubspec.yaml` still says the gate does not check it, and the gate does
 
 **Status: OPEN.** Found by the F-12 Crawler, which read the comment before running the checks and
@@ -223,4 +255,7 @@ These are true, cost nothing to know, and would cost real time to rediscover.
   is unobserved. P1-04's concurrency defaults (4 per node, 12 tree-wide) have no research behind
   them, unlike the depth cap of 3 — they are knobs, not findings. (Phase 1)
 - **`Notification`, `PreCompact` and `PostCompact` hook payloads remain uncaptured.** Nothing before
-  Phase 5 needs them. (Phase 0)
+  Phase 5 needs them. They nevertheless have `hook.*` kinds as of P8-01, because a name that is
+  known and unfired is a different thing from a name that is unknown — folding them into
+  `hook.unknown` would make the first one ever captured read as a schema change rather than a first
+  sighting. (Phase 0, P8-01)

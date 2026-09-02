@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:sproutd/hooks.dart';
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
@@ -881,6 +882,124 @@ void main() {
       ]) {
         expect(kind, isNot(startsWith(frameKindPrefix)));
       }
+    });
+  });
+
+  group('and so are the hook event kinds', () {
+    // P8-01, and the same argument reaching the second observation path. These
+    // are what the hook path records a payload under, and they are declared in
+    // `package:sprout_protocol/values.dart` BEFORE the producer that writes
+    // them exists — which is the whole lesson of F-11 and F-12, where the
+    // strings were literals at a call site until a second caller had to spell
+    // them again.
+    //
+    // Reached here through `package:sproutd/hooks.dart`, never sprout_protocol
+    // directly, so these lines do not compile unless the hook library still
+    // publishes the vocabulary it parses into.
+    //
+    // The pin is the literal TEXT, for the reason the groups above give: an
+    // append-only `kind` column with no rewrite path. It also pins the one
+    // decision this vocabulary turns on — the wire's own spelling, verbatim,
+    // `PascalCase` and all. The alternative (`hook.session_start`) needs a case
+    // mapping between what Claude Code sends and what sprout stores, and a
+    // mapping is a second derivation that can drift from the first and cannot
+    // be checked by reading one line.
+
+    test('the eight events observed firing keep their spellings', () {
+      expect(hookSessionStartKind, 'hook.SessionStart');
+      expect(hookSessionEndKind, 'hook.SessionEnd');
+      expect(hookUserPromptSubmitKind, 'hook.UserPromptSubmit');
+      expect(hookPreToolUseKind, 'hook.PreToolUse');
+      expect(hookPostToolUseKind, 'hook.PostToolUse');
+      expect(hookSubagentStartKind, 'hook.SubagentStart');
+      expect(hookSubagentStopKind, 'hook.SubagentStop');
+      expect(hookStopKind, 'hook.Stop');
+    });
+
+    test('and so do the three that were registered but never fired', () {
+      // They have kinds at all because a name that is KNOWN and unfired is a
+      // different thing from a name that is unknown. Folding them together
+      // would make the first Notification anyone ever captures look like a
+      // schema change rather than a first sighting.
+      expect(hookNotificationKind, 'hook.Notification');
+      expect(hookPreCompactKind, 'hook.PreCompact');
+      expect(hookPostCompactKind, 'hook.PostCompact');
+    });
+
+    test('and the two that are sprout\'s own words, not the wire\'s', () {
+      // Lower case on purpose: every real event name is PascalCase, so neither
+      // can collide with a name the wire later introduces. And they are two
+      // rather than one for `runner.refused` vs `runner.launch_failed`'s
+      // reason — "we do not recognise this event" and "there was no event to
+      // recognise" are different facts, and one kind for both hides which a
+      // run hit.
+      expect(hookUnknownKind, 'hook.unknown');
+      expect(hookMalformedKind, 'hook.malformed');
+      expect(hookKindPrefix, 'hook.');
+    });
+
+    test('the map knows exactly the eleven names in the binary', () {
+      // `17` §1: all eleven were registered at once against v2.1.252 and the
+      // settings file validated, because a bad event name is SILENTLY ignored
+      // under -p — so registering all of them and confirming firing is the
+      // only safe way to establish the set.
+      expect(hookKindsByEventName.keys, hasLength(11));
+      expect(
+        hookKindsByEventName.keys,
+        containsAll(const [
+          'SessionStart',
+          'SessionEnd',
+          'UserPromptSubmit',
+          'PreToolUse',
+          'PostToolUse',
+          'SubagentStart',
+          'SubagentStop',
+          'Stop',
+          'Notification',
+          'PreCompact',
+          'PostCompact',
+        ]),
+      );
+    });
+
+    test('and the lookup is total, including for a name it does not know', () {
+      expect(hookKindForEventName('PreToolUse'), hookPreToolUseKind);
+      expect(hookKindForEventName('NotAnEvent'), hookUnknownKind);
+      expect(hookKindForEventName(null), hookUnknownKind);
+      // Case matters, because the spelling is the wire's and not a normalised
+      // form of it. A lookup that quietly accepted `pretooluse` would be the
+      // case mapping this vocabulary exists to avoid, arriving by the back
+      // door.
+      expect(hookKindForEventName('pretooluse'), hookUnknownKind);
+    });
+
+    test('all thirteen hook kinds are distinct and none is a runner kind', () {
+      final hookKinds = {
+        ...hookKindsByEventName.values,
+        hookUnknownKind,
+        hookMalformedKind,
+      };
+      expect(hookKinds, hasLength(13));
+      // A board branches on these, and the two paths are different sources of
+      // truth about the same session — the stream path only sees what sprout
+      // launched. A collision across prefixes would make a row from one path
+      // read as a row from the other.
+      for (final kind in hookKinds) {
+        expect(kind, startsWith(hookKindPrefix));
+        expect(kind, isNot(startsWith(frameKindPrefix)));
+      }
+      expect(
+        hookKinds.intersection({
+          nodeObservedKind,
+          nodeUpdatedKind,
+          runnerSpawnedKind,
+          runnerRefusedKind,
+          runnerLaunchFailedKind,
+          runnerSessionKind,
+          runnerExitedKind,
+        }),
+        isEmpty,
+      );
     });
   });
 }

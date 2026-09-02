@@ -54,6 +54,16 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// kill or a signal exactly as `test/liveness_test.dart` greps that one, and
 /// two areas means two guards rather than one guard covering whichever files
 /// happened to sit beside it.
+///
+/// `hooks` is P8-01's: the parser for the payloads Claude Code delivers on a
+/// hook's stdin, which is the second of the two observation paths in
+/// `docs/01-plan.md` §4 and the only one that can see a session sprout did not
+/// launch. It is its own area rather than a corner of `stream` even though both
+/// are pure functions over control-plane bytes, because the two read *different
+/// producers* under different promises — `stream` may crash and take only the
+/// daemon with it, while a hook runs inside the developer's own session and a
+/// throw there breaks the thing sprout was watching. Keeping them apart is what
+/// lets that stricter promise be a property of an area rather than a habit.
 const libraries = {
   'store',
   'stream',
@@ -65,6 +75,7 @@ const libraries = {
   'ui',
   'liveness',
   'watchdog',
+  'hooks',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

@@ -100,6 +100,20 @@
 # is non-empty. That is deliberate and it is why this rule is worth having:
 # `jaspr build` exits 0 when the compiler skips the entrypoint, so gating on
 # the build alone is a check that cannot fail.
+# sprout_protocol carries the wire vocabulary both other packages depend on by path,
+# and `dart analyze` covers the package it runs in, NOT its path dependencies — a lint
+# planted in sprout_protocol/lib/ was reported "No issues found" by both other rules.
+# So this package needs its own, and it needs its CONSUMERS: sproutd's tests compile and
+# exercise every line of it, and sprout_ui's `dart test` runs a real jaspr build and
+# asserts a non-empty bundle. That last one is the only check that catches a web-unsafe
+# change here, because build_web_compilers reports that failure as a WARNING and exits 0.
+# That silent zero is what F-07 was, and it cost a whole leaf to find.
+"sprout_protocol/**":
+  - "cd sprout_protocol && dart format --output=none --set-exit-if-changed ."
+  - "cd sprout_protocol && dart analyze --fatal-infos --fatal-warnings"
+  - "cd sproutd && dart test"
+  - "cd sprout_ui && dart test"
+
 "sprout_ui/**":
   - "cd sprout_ui && dart format --output=none --set-exit-if-changed ."
   - "cd sprout_ui && dart analyze --fatal-infos --fatal-warnings"

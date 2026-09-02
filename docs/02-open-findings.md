@@ -60,6 +60,14 @@ check, which also catches the MCP and shell-variable cases the same message list
 **Do not "fix" this by forbidding `python3` heredocs.** They are how this session is instructed to
 edit files at all, and a guard that blocks the ordinary path teaches people to route around it.
 
+**Confirmed a second time, first-person.** Adding the `sprout_protocol/**` rule below, this session
+took a `game_loop authorize` grant from Morgan and then wrote the file with a `python3 - <<'PY'`
+heredoc. The grant was **not consumed and no `authorized_write` was logged** — the guard never
+fired. Re-running the identical write as `cp <file> .game_loop/verify.yaml` was refused, consumed
+the grant, and produced the log entry. Same file, same content, same session, same minute: the
+interpreter path is unguarded and the shell path is guarded. That is the gap in one pair of runs,
+and it is why the remedy has to be detection on the file rather than more parsing of the command.
+
 ---
 
 ## Notes that are not findings

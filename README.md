@@ -92,9 +92,15 @@ Verified against the compiled binary run from `/`, not just on a branch — the 
 
 ### Known defects
 
-[`docs/02-open-findings.md`](docs/02-open-findings.md) is the real list — five defects observed
-during real runs and deliberately left unrepaired, each because the fix lies in a file the leaf
-that found it did not own. Three of them block Phase 3. Nothing is closed there by being read.
+[`docs/02-open-findings.md`](docs/02-open-findings.md) is the real list, and the rule is that an
+entry leaves it in exactly one way: a commit that fixes it, which deletes the entry and says so.
+Nothing is closed there by being read.
+
+Eight have been recorded so far and seven are fixed. The one still open is **F-08**, which is
+`game_loop`'s rather than sprout's: its rule-file guard reads the command string, so a `python3`
+heredoc writes a policy file without passing through the authorization that would record a human's
+words. Observed twice, once accidentally and once while holding a valid grant that then went
+unspent.
 
 ## Repo layout
 

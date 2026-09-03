@@ -53,12 +53,18 @@ export 'package:sprout_protocol/values.dart'
         hookSubagentStartKind,
         hookSubagentStopKind,
         hookUnknownKind,
-        hookUserPromptSubmitKind;
+        hookUserPromptSubmitKind,
+        observedProcessKind;
 
 export 'src/hooks/payload.dart'
     show HookPayload, HookRecord, MalformedHookPayload;
 export 'src/hooks/projection.dart'
-    show HookProjection, hookNodeIdPrefix, unknownHookProject;
+    show
+        HookProjection,
+        claudePidEnvVariable,
+        claudeSessionIdEnvVariable,
+        hookNodeIdPrefix,
+        unknownHookProject;
 export 'src/hooks/raw_log.dart'
     show
         appendHookRawLog,

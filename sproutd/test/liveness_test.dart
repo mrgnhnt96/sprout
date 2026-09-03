@@ -1,9 +1,11 @@
 @Timeout(Duration(minutes: 2))
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:sproutd/hooks.dart';
 import 'package:sproutd/liveness.dart';
 import 'package:sproutd/store.dart';
 import 'package:test/test.dart';
@@ -14,6 +16,13 @@ const frozenAfter = Duration(seconds: 2);
 
 /// Comfortably past [frozenAfter], so a frozen transcript really is frozen.
 const pastFrozen = Duration(milliseconds: 2600);
+
+/// The 37 hook payloads captured in Phase 0.
+///
+/// Read from disk for `hooks_test.dart`'s reason: a hand-written payload is
+/// this file's own idea of the schema being checked against itself. The
+/// foreign-session tests below override two fields of a capture and no more.
+const String hookFixtures = '../docs/research/fixtures/phase0/hooks';
 
 void main() {
   late Directory dir;
@@ -552,6 +561,306 @@ void main() {
       );
       expect(defaultFrozenAfter, const Duration(minutes: 5));
       expect(defaultStartTimeTolerance, const Duration(seconds: 2));
+    });
+  });
+
+  group('a session sprout did not spawn — P8-04', () {
+    // Every store below is filled by folding real Phase 0 hook payloads
+    // through `HookProjection`, never by writing rows by hand. A test that
+    // hand-built the rows would prove the measurement reads what the test
+    // wrote, and say nothing about whether the projection writes it.
+    //
+    // Two fields are overridden per payload and no others: `session_id`, so
+    // each test owns its own node ids, and `transcript_path`, so the file
+    // being timed is one this test controls. The shape around them is the
+    // capture's.
+
+    const String foreignSession = 'f0f0f0f0-0000-4000-8000-000000000001';
+    final String rootId = HookProjection.rootNodeId(foreignSession);
+
+    Map<String, Object?> capture(String relative) =>
+        jsonDecode(File('$hookFixtures/$relative').readAsStringSync())
+            as Map<String, Object?>;
+
+    /// A captured payload with this test's session id and transcript in it.
+    Map<String, Object?> payload(
+      String relative, {
+      String session = foreignSession,
+      String? transcript,
+    }) => {
+      ...capture(relative),
+      'session_id': session,
+      'transcript_path': ?transcript,
+    };
+
+    /// Folds [payloads] in, exactly as `sprout hook` does: parse the bytes,
+    /// then project. [environment] is the hook process's, which is where
+    /// `CLAUDE_PID` lives.
+    void fold(
+      List<Map<String, Object?>> payloads, {
+      required Map<String, String> environment,
+      DateTime? at,
+    }) {
+      final projection = HookProjection(
+        store: store,
+        clock: () => at ?? DateTime.now().toUtc(),
+        environment: environment,
+      );
+      for (final one in payloads) {
+        expect(
+          projection.observe(HookRecord.parse(jsonEncode(one))),
+          isNotNull,
+          reason: 'the projection refused $one',
+        );
+      }
+    }
+
+    Map<String, String> envFor(int pid, {String session = foreignSession}) => {
+      claudePidEnvVariable: '$pid',
+      claudeSessionIdEnvVariable: session,
+    };
+
+    test('a live foreign root is live, measured through its own pid', () async {
+      final process = await writer('live-foreign');
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('live-foreign'),
+        ),
+      ], environment: envFor(process.pid));
+
+      // Let the writer append once more, so the freshness reference is the
+      // transcript's own mtime rather than the moment the record was written.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.live);
+      expect(
+        verdict.pid,
+        process.pid,
+        reason: 'the pid came from CLAUDE_PID, not from a runner.spawned',
+      );
+      expect(verdict.because, contains('the transcript last grew'));
+      // The record really is the hook path's, and the feed does not claim
+      // sprout launched this process.
+      final kinds = store
+          .eventsSince(0, nodeId: rootId)
+          .map((e) => e.kind)
+          .toList();
+      expect(kinds, contains(observedProcessKind));
+      expect(kinds, isNot(contains(runnerSpawnedKind)));
+    });
+
+    test('and the same root with a frozen transcript is stalled', () async {
+      final process = await sleeper('stalled-foreign', withTranscript: false);
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('stalled-foreign'),
+        ),
+        payload(
+          'A/1788280943.696918-UserPromptSubmit.stdin.json',
+          transcript: transcriptPath('stalled-foreign'),
+        ),
+      ], environment: envFor(process.pid));
+
+      // The session wrote one line and then went quiet, which is the shape
+      // this leaf exists for: a live pid beside a transcript that has stopped
+      // growing. Written AFTER the record so the mtime is the freshness
+      // reference rather than the moment sprout first saw the session.
+      File(transcriptPath('stalled-foreign')).writeAsStringSync('{}\n');
+      await Future<void>.delayed(pastFrozen);
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.stalled);
+      expect(verdict.pid, process.pid);
+      // The sentence a human is paged with has to be arguable by hand: it
+      // names the pid to `ps`, when that process started, and how long the
+      // transcript has stood still against the threshold it was judged on.
+      expect(verdict.because, contains('pid ${process.pid} is alive'));
+      expect(verdict.because, contains('the transcript last grew'));
+      expect(verdict.because, contains('threshold'));
+      expect(store.node(rootId)!.status, NodeStatus.working);
+    });
+
+    test('the same root after Stop is ended, however long it sits', () async {
+      final process = await sleeper('ended-foreign');
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('ended-foreign'),
+        ),
+        payload(
+          'A/1788280949.837870-Stop.stdin.json',
+          transcript: transcriptPath('ended-foreign'),
+        ),
+      ], environment: envFor(process.pid));
+
+      expect(store.node(rootId)!.status, NodeStatus.checkpointed);
+      await Future<void>.delayed(pastFrozen);
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.ended);
+      expect(endedStatuses, contains(NodeStatus.checkpointed));
+    });
+
+    test('a live foreign SUBAGENT is unmeasured, never abandoned', () async {
+      // The trap this leaf exists to avoid. There is one OS process and one
+      // session_id per `claude -p`, so `CLAUDE_PID` inside a subagent's
+      // payload is the ROOT's pid, and `transcript_path` is the root's
+      // transcript. Measuring either would give the child the parent's pulse.
+      final process = await writer('subagent-foreign');
+      fold([
+        payload(
+          'B/1788280992.087510-SessionStart.stdin.json',
+          transcript: transcriptPath('subagent-foreign'),
+        ),
+        payload(
+          'B/1788280995.970887-SubagentStart.stdin.json',
+          transcript: transcriptPath('subagent-foreign'),
+        ),
+      ], environment: envFor(process.pid));
+
+      final childId = HookProjection.subagentNodeId(
+        foreignSession,
+        'aab408509339890dd',
+      );
+      final verdicts = await measureOver().sweep();
+      expect(verdicts[rootId]!.liveness, Liveness.live);
+
+      final child = verdicts[childId]!;
+      expect(child.liveness, Liveness.unmeasured);
+      expect(child.liveness, isNot(Liveness.abandoned));
+      expect(
+        child.pid,
+        isNull,
+        reason: "the root's pid must not be worn by its child",
+      );
+      expect(child.because, contains('names no pid'));
+      expect(child.because, contains('no process of its own'));
+      expect(child.because, contains('transcript_path is always the root'));
+    });
+
+    test('and the root pid never reaches the child as a pid', () async {
+      final process = await writer('subagent-evidence');
+      fold([
+        payload(
+          'B/1788280992.087510-SessionStart.stdin.json',
+          transcript: transcriptPath('subagent-evidence'),
+        ),
+        payload(
+          'B/1788280995.970887-SubagentStart.stdin.json',
+          transcript: transcriptPath('subagent-evidence'),
+        ),
+      ], environment: envFor(process.pid));
+
+      final childId = HookProjection.subagentNodeId(
+        foreignSession,
+        'aab408509339890dd',
+      );
+      final record = store
+          .eventsSince(0, nodeId: childId)
+          .lastWhere((e) => e.kind == observedProcessKind);
+      expect(record.payload['pid'], isNull);
+      expect(record.payload['raw_log'], isNull);
+      // Kept as evidence, under a name nothing probes.
+      expect(record.payload['session_pid'], process.pid);
+    });
+
+    test('a recycled pid on this path reads exactly as it does on the '
+        'runner path', () async {
+      // Same construction as the runner-path test above: pid P is genuinely
+      // alive and P's process demonstrably started AFTER the node recorded P.
+      // Only the moment sprout wrote the pid down is backdated — which on this
+      // path is a session whose hooks reported in an hour ago.
+      final process = await sleeper('recycled-foreign');
+      fold(
+        [
+          payload(
+            'A/1788280943.420722-SessionStart.stdin.json',
+            transcript: transcriptPath('recycled-foreign'),
+          ),
+        ],
+        environment: envFor(process.pid),
+        at: DateTime.now().toUtc().subtract(const Duration(hours: 1)),
+      );
+
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.abandoned);
+      expect(verdict.because, contains('the pid was reused'));
+      expect(verdict.because, contains('that process is not ours'));
+      expect(verdict.processStartedAt!.isAfter(verdict.spawnedAt!), isTrue);
+    });
+
+    test('a root whose hook had no CLAUDE_PID is unmeasured, not '
+        'abandoned', () async {
+      // A failed read is not a fact about the world. Nothing here guesses the
+      // pid from the hook process's parent: a wrong pid is a confident verdict
+      // about a stranger's process.
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('no-pid'),
+        ),
+      ], environment: const {});
+
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.unmeasured);
+      expect(verdict.because, contains('no $claudePidEnvVariable'));
+      expect(verdict.pid, isNull);
+    });
+
+    test('an environment naming a different session records no pid', () async {
+      final process = await writer('wrong-session');
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('wrong-session'),
+        ),
+      ], environment: envFor(process.pid, session: 'some-other-session'));
+
+      final verdict = (await measureOver().verdictFor(rootId))!;
+      expect(verdict.liveness, Liveness.unmeasured);
+      expect(verdict.pid, isNull);
+    });
+
+    test('the process record is written once per node, not per payload', () {
+      // Every `current_task` move appends an event a board re-renders on, and
+      // one process record per tool call would be that flood by another door.
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('once'),
+        ),
+        payload(
+          'A/1788280943.696918-UserPromptSubmit.stdin.json',
+          transcript: transcriptPath('once'),
+        ),
+        payload(
+          'A/1788280948.083408-PreToolUse.stdin.json',
+          transcript: transcriptPath('once'),
+        ),
+        payload(
+          'A/1788280948.175239-PostToolUse.stdin.json',
+          transcript: transcriptPath('once'),
+        ),
+      ], environment: envFor(1));
+
+      expect(
+        store
+            .eventsSince(0, nodeId: rootId)
+            .where((e) => e.kind == observedProcessKind)
+            .length,
+        1,
+      );
+    });
+
+    test('a node sprout DID spawn is untouched by any of this', () async {
+      // The runner path reads its pid out of `runner.spawned` exactly as it
+      // did, and both kinds are one measurement rather than two.
+      final process = await writer('runner-path');
+      record('runner-path', pid: process.pid);
+      final verdict = (await measureOver().verdictFor('runner-path'))!;
+      expect(verdict.liveness, Liveness.live);
+      expect(verdict.because, contains('pid ${process.pid} is alive'));
+      expect(spawnRecordKinds, {runnerSpawnedKind, observedProcessKind});
     });
   });
 

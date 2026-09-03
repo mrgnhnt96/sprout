@@ -47,6 +47,7 @@ export 'src/values/kinds.dart'
         hookUserPromptSubmitKind,
         nodeObservedKind,
         nodeUpdatedKind,
+        observedProcessKind,
         runnerExitedKind,
         runnerLaunchFailedKind,
         runnerRefusedKind,

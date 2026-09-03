@@ -144,6 +144,49 @@ const String runnerSessionKind = 'runner.session';
 /// the two are separate on purpose.
 const String runnerExitedKind = 'runner.exited';
 
+/// The event appended when sprout learned the process behind a session it did
+/// **not** launch.
+///
+/// **The same measurement, from the other door.** [runnerSpawnedKind] is the
+/// anchor of every liveness measurement, and its two load-bearing fields are
+/// `pid` and `raw_log`. This kind carries those two fields under the same two
+/// names, because timing a transcript beside a live pid is genuinely the same
+/// question whichever path learned the pid — a measurement that forked here
+/// would be two derivations of one rule, which is F-01's shape.
+///
+/// **A distinct kind, because sprout did not spawn this process.** A feed that
+/// recorded a developer's own terminal as `runner.spawned` would be claiming a
+/// launch that never happened, and the two paths are separate sources of truth
+/// on purpose — the same argument [hookKindPrefix] makes for the payload kinds.
+///
+/// It is not itself prefixed `hook.`, and that is deliberate too. Every
+/// `hook.*` kind is one delivered payload stored verbatim; this is sprout's own
+/// record, derived from a payload and from the hook process's environment
+/// (`CLAUDE_PID`), and a consumer that reads the `hook.` prefix as *"the raw
+/// bytes Claude Code sent"* would be wrong about this row. Nor is it `runner.*`
+/// or `frame.*`, for the reason above.
+///
+/// The payload carries, in order of what a measurement needs:
+///
+/// - `pid` — the session's own OS process, from `CLAUDE_PID`. **Absent when it
+///   could not be established**, and absent on every subagent, because there is
+///   one process per `claude -p` however deep the tree goes: recording the
+///   root's pid on a child would make every child inherit the root's liveness.
+/// - `raw_log` — the transcript to time. Absent on a subagent for the same
+///   family of reason: `transcript_path` is always the *root* session's, so
+///   timing it to decide whether a child is frozen reports the parent's pulse.
+/// - `why` — one sentence naming what could not be looked at, when something
+///   could not be. It reaches the human verbatim in a liveness verdict's
+///   `because`.
+/// - `session_id`, and `agent_id` on a subagent — the identity this row is
+///   about, so the event is readable without joining it to a node row.
+///
+/// A record carrying no `pid` is what makes a hook-observed subagent
+/// `unmeasured` rather than `abandoned`. That distinction is the whole reason
+/// this kind is written for a node whose process sprout cannot name at all: a
+/// node with no record of any kind reads as *never started*, which pages.
+const String observedProcessKind = 'process.observed';
+
 /// The prefix on every kind that records what a **hook** delivered.
 ///
 /// Deliberately parallel to `frame.`, and deliberately not the same as it. The

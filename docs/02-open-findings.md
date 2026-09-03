@@ -184,28 +184,74 @@ readers do with a status they have never seen — not a line in a projection.
 
 ---
 
-### F-13 — `sprout_protocol/pubspec.yaml` still says the gate does not check it, and the gate does
+### F-20 — The ring cap is per watchdog PROCESS, so a terminal closed last Tuesday rings again on every restart
 
-**Status: OPEN.** Found by the F-12 Crawler, which read the comment before running the checks and
-believed it.
+**Status: OPEN.** Found by P8-04, measured in `sproutd/test/watchdog_test.dart` group 8 ("a killed
+session rings to the cap and then stops, until the watchdog is restarted").
 
-`sprout_protocol/pubspec.yaml:60` states, in bold: *"`.game_loop/verify.yaml` still owes this
-package a rule … Until one lands, a change confined to `sprout_protocol/**` is UNCHECKED"*. That
-rule landed. `.game_loop/verify.yaml:111` carries a `"sprout_protocol/**"` entry running this
-package's format and analyze plus **both** consumers' suites — the exact shape the comment asks
-for, with its own comment above it explaining why the consumers are the load-bearing half.
+A session killed mid-turn fires **no** `Stop` and **no** `SessionEnd`. Probed with a real `kill -9`
+against a real `claude -p`: the capture holds exactly `SessionStart` at `1788389785.973` and
+`UserPromptSubmit` at `1788389786.369`, the kill lands about six seconds in, and nothing follows.
+The same prompt allowed to finish produced `SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+Stop, SessionEnd`. So a closed terminal leaves a hook-observed root `working` forever with a dead
+pid, which `LivenessMeasure` calls `abandoned` — correctly, and by the same rule `runner.dart`
+already follows, which refuses to infer completion from process exit (INV12).
 
-The rest of the paragraph is still true and worth keeping: `cd sproutd && dart analyze
---fatal-infos` really does not analyze these sources, which is why the rule has to exist. Only the
-"still owes" claim and the "UNCHECKED" conclusion are stale.
+**What the cap actually does with it, measured rather than reasoned about.** `RingLedger.rule`
+resets a node's count when its `Contradiction.mark` moves, and `mark` is `LivenessVerdict.lastWrite`,
+which is null for a node whose process was never found. So an abandoned node has no freshness to
+advance and can only clear through `progressed`, which it never will. It rings exactly `cap` times —
+1, 2, 3 with the shipped cap — and is then silenced. That much is right, and it is the behaviour
+this leaf deliberately did **not** suppress: a session that stopped without an honest ending is the
+exact thing sprout exists to surface.
 
-**Why it matters more than a stale comment usually does.** It tells the next reader their change to
-this package is unverified when it is in fact the most heavily verified path in the repo — and the
-plausible reactions to believing it are all wrong: skip the gate, hand-test instead, or re-add a
-rule that already exists. A comment that understates coverage is read as permission.
+**The part that is a finding.** `RingLedger` lives in the `Watchdog` object, in memory, and
+`Watchdog` is constructed inside `sprout ui` (`sproutd/bin/sprout.dart:901`). The node row is never
+removed from the store. So every restart of `sprout ui` rings three more times about the same dead
+session, forever, and there is no upper bound on the total. A machine that accumulates a dozen
+closed terminals over a month greets its owner with a wall of pages about sessions they closed on
+purpose, which is how a watchdog gets switched off — the failure the cap exists to prevent, arriving
+by a longer road.
 
-**Why it was not fixed here.** F-12 touched this package's `lib/`, not its `pubspec.yaml`, and the
-correction is a prose edit with no test that can hold it.
+The measurement is in the test: after six sweeps a first watchdog has rung three times and reports
+`isSilenced`; a second watchdog over the *same store* rings again at `consecutiveRings: 1`.
+
+**Not fixed here, because the fix is a decision and not a line.** The candidates are all Morgan's to
+pick between and each changes what the watchdog is for: persist the ledger beside the journal; age
+an abandoned hook-observed root out of the graph after some period; give `NodeStatus` a state for
+"the process is gone" (which is F-17, and a protocol change with an append-only feed behind it); or
+decide that repeating is correct and a dead session should keep asking to be cleared.
+
+---
+
+### F-21 — A running hook-observed subagent could be timed, and deliberately is not, because "absent" reads as "frozen"
+
+**Status: OPEN.** Found by P8-04 while implementing the subagent case.
+
+`docs/research/17-observed-schemas.md` §3 says a subagent's own transcript lives at
+`…/<session-id>/subagents/agent-<agent_id>.jsonl` and appears as `agent_transcript_path` on
+`SubagentStop` alone. **The pattern holds exactly**: both captures in
+`docs/research/fixtures/phase0/hooks/B/` carry a path that is byte-for-byte what
+`dirname(transcript_path)/<session_id>/subagents/agent-<agent_id>.jsonl` builds from the session id
+and agent id in the same payload. So the path for a *running* subagent is derivable, and deriving it
+would let a wedged subagent under a busy root be measured instead of reported as `unmeasured`.
+
+**It is not derived, because of what happens when the file is not there yet.**
+`LivenessMeasure._pulseFromTranscript` treats `TranscriptAbsent` as *not written yet* rather than as
+*could not look*: the freshness reference falls back to the spawn record's timestamp, and the node
+becomes frozen — and so `stalled`, and so **rings** — on the same threshold as everyone else. That
+is right for the runner path, where sprout created the file's directory and knows the process was
+told to write there. It is wrong for a derived path: sprout would be timing a filename it invented,
+and a subagent whose transcript simply has not appeared yet would page a human sitting in front of a
+perfectly healthy session. That is the one failure this whole leaf is shaped to avoid.
+
+Making it safe needs a third transcript outcome — *a path sprout guessed, whose absence proves
+nothing* — distinct from both `TranscriptAbsent` and `TranscriptUnreadable`, and that is a change to
+`lib/src/liveness/transcript.dart` and to every branch that switches on it. Worth doing; not worth
+doing as a side effect of this leaf.
+
+Until then a running hook-observed subagent is `unmeasured`, with a `because` that names what could
+not be looked at, and the watchdog lists it as blind rather than ringing about it.
 
 ### F-22 — `showrunner integrate` re-runs only sproutd's three checks, whatever the change touched
 

@@ -1,6 +1,8 @@
 /// Folding hook payloads into the store, one payload at a time.
 library;
 
+import 'package:sprout_protocol/values.dart';
+
 import '../../store.dart';
 import '../stream/prompt.dart';
 import 'payload.dart';
@@ -22,6 +24,36 @@ const String hookNodeIdPrefix = 'hook/';
 /// mistake it for one and try to open it. Every payload in the Phase 0 corpus
 /// carries a `cwd`; this exists for the payload that does not.
 const String unknownHookProject = '<unknown>';
+
+/// The environment variable a hook process reads its session's pid from.
+///
+/// **Measured, twice, on this machine.** A settings file whose hook dumped
+/// `env | grep '^CLAUDE'` and then ran `ps -o pid=,ppid=,command= -p
+/// "$CLAUDE_PID"` was run against a real `claude -p` on CLI 2.1.258 and again
+/// on 2.1.259. On every event that fired, `CLAUDE_PID` was present, identical
+/// across events, equal to the pid of the `claude` process itself, and equal to
+/// the hook shell's own `$PPID` — so it is the session, not the hook and not a
+/// wrapper. `docs/research/17-observed-schemas.md` §9 claims this; the Phase 0
+/// fixtures do not contain the `env.txt` files that would have proved it, so it
+/// was re-measured rather than believed.
+///
+/// It is the only way this path can learn a pid at all. A hook payload carries
+/// no process identifier of any kind.
+const String claudePidEnvVariable = 'CLAUDE_PID';
+
+/// The environment variable carrying the session id the hook process belongs
+/// to.
+///
+/// Read only to **refuse**: if it is present and disagrees with the payload's
+/// `session_id`, the environment belongs to a different session than the bytes
+/// do, and [claudePidEnvVariable] would be the wrong process. Recording a wrong
+/// pid is worse than recording none — none measures as `unmeasured`, and a
+/// wrong one is a confident verdict about somebody else's process.
+///
+/// Absence is not a refusal. Every payload the tests replay arrives with no
+/// environment at all, and so does any future caller that folds a payload in
+/// from somewhere other than a live hook.
+const String claudeSessionIdEnvVariable = 'CLAUDE_CODE_SESSION_ID';
 
 /// Projects hook payloads into the store, one payload at a time.
 ///
@@ -87,12 +119,62 @@ const String unknownHookProject = '<unknown>';
 /// are recorded as feed events and change no row. Every `current_task` move
 /// appends a `runner.updated` that a board re-renders on, and two of those per
 /// tool call is the flood `nodeUpdatedKind` exists to prevent.
+///
+/// ## The process record, which is what makes a foreign session measurable
+///
+/// Seeing a session and being able to *measure* it are different things.
+/// `LivenessMeasure` finds a node's process through a spawn record — a `pid` to
+/// probe beside a `raw_log` to time — and only `SessionRunner` writes one, so
+/// before P8-04 every hook-observed node reported *"no spawn event for this
+/// node, and no ending recorded"*, which is `abandoned`, which the watchdog
+/// rings on. The session most likely to be silently stuck was the one the
+/// watchdog could say least about.
+///
+/// So this projection also writes [observedProcessKind], carrying `pid` and
+/// `raw_log` under exactly those names. What it writes them **from** differs by
+/// depth, and the asymmetry is the whole care of this file:
+///
+/// - **A root** gets the real pair: `CLAUDE_PID` from the hook process's
+///   environment, and the payload's `transcript_path`. That is a session a
+///   human started in a terminal, now measurable exactly as a spawned one is.
+/// - **A subagent** gets neither, on purpose. There is one OS process and one
+///   `session_id` per `claude -p` however deep the tree goes (`17` §2), so
+///   `CLAUDE_PID` inside a subagent's payload is the *root's* pid and recording
+///   it would make every child inherit the root's liveness. And
+///   `transcript_path` is always the root session's `.jsonl` even inside a
+///   subagent (`17` §3), so timing it to decide whether a child is frozen would
+///   report the parent's pulse as the child's. A record with neither field
+///   measures as `unmeasured` with a `because` naming what could not be looked
+///   at, which is the honest answer and does not ring.
+///
+/// **It is written once per node, not once per payload.** On the payload that
+/// creates the node's row — which is the first sighting, and so covers hooks
+/// installed halfway through a session — and again on that node's own
+/// `SessionStart` or `SubagentStart`, which is where a *new* process for an id
+/// sprout already knows announces itself. `LivenessMeasure` takes the newest,
+/// so a resumed session measures against its current pid. Writing one per
+/// payload would put a row in the feed for every tool call, which is the flood
+/// `nodeUpdatedKind` exists to prevent, arriving by a different door.
 final class HookProjection {
   /// Creates a projection over [store], stamping its writes from [clock].
-  HookProjection({required this.store, required this._clock});
+  ///
+  /// [environment] is the hook process's own environment, which is where
+  /// [claudePidEnvVariable] lives — the only place a pid can be learned on this
+  /// path. It defaults to empty rather than to `Platform.environment` so that
+  /// nothing here reads ambient state a caller did not hand it: a test replaying
+  /// fixtures must not pick up the pid of the process running the test, which
+  /// would be a live pid attached to somebody else's session id.
+  HookProjection({
+    required this.store,
+    required this._clock,
+    this.environment = const {},
+  });
 
   /// Where the payloads are written.
   final SproutStore store;
+
+  /// The hook process's environment. See [claudePidEnvVariable].
+  final Map<String, String> environment;
 
   final DateTime Function() _clock;
 
@@ -139,10 +221,37 @@ final class HookProjection {
         ? rootId
         : subagentNodeId(sessionId, agentId);
 
+    // Whether each row exists is read BEFORE the write that would create it,
+    // because "this payload is the first sighting of the node" is exactly when
+    // the process record has to be written and is unrecoverable afterwards.
+    final rootIsNew = store.node(rootId) == null;
     _writeRoot(record, sessionId);
-    if (agentId != null) _writeSubagent(record, sessionId, agentId);
+    if (rootIsNew ||
+        (!record.isFromSubagent && record.eventName == 'SessionStart')) {
+      _recordRootProcess(record, sessionId);
+    }
+
+    if (agentId != null) {
+      final subagentIsNew = store.node(emitterId) == null;
+      _writeSubagent(record, sessionId, agentId);
+      if (subagentIsNew || record.eventName == 'SubagentStart') {
+        _recordSubagentProcess(record, sessionId, agentId);
+      }
+    }
+
     final spawned = record.spawnedAgentId;
-    if (spawned != null) _writeJoin(record, sessionId, spawned, emitterId);
+    if (spawned != null) {
+      final calleeIsNew =
+          store.node(subagentNodeId(sessionId, spawned)) == null;
+      _writeJoin(record, sessionId, spawned, emitterId);
+      // A node the join created has been asked for and has reported nothing.
+      // It still needs a record saying its process cannot be named: without
+      // one it reads as never started, which is `abandoned`, which rings — and
+      // a child claimed a millisecond before its own `SubagentStart` is the
+      // grandchild's order in `hooks/B/`, so this is the normal case and not
+      // an edge.
+      if (calleeIsNew) _recordSubagentProcess(record, sessionId, spawned);
+    }
 
     store.append(
       nodeId: emitterId,
@@ -199,6 +308,110 @@ final class HookProjection {
       announce: {'session_id': sessionId},
       ts: _clock(),
     );
+  }
+
+  /// Records the OS process behind a session sprout did not launch.
+  ///
+  /// The pair a liveness measurement needs, under the two names it already
+  /// reads: `pid` from [claudePidEnvVariable] and `raw_log` from the payload's
+  /// `transcript_path`. Both may be missing, and a record that is missing one
+  /// is still worth writing — it is what makes the node `unmeasured` with a
+  /// reason instead of `abandoned` with none.
+  ///
+  /// **Nothing is inferred when the pid is not there.** The hook process's
+  /// parent really is the session, so `getppid()` would work in the common case
+  /// and would be wrong the moment anything wraps the hook — and a wrong pid is
+  /// a confident verdict about a stranger's process, where a missing one is an
+  /// honest `unmeasured`.
+  void _recordRootProcess(HookPayload payload, String sessionId) {
+    final pid = _sessionPid(sessionId);
+    final rawLog = payload.transcriptPath;
+    final missing = [
+      if (pid == null)
+        'no $claudePidEnvVariable in the hook process environment, so the '
+            "session's own process could not be identified",
+      if (rawLog == null)
+        'the payload carried no transcript_path, so there is no transcript to '
+            'time',
+    ];
+
+    store.append(
+      nodeId: rootNodeId(sessionId),
+      kind: observedProcessKind,
+      payload: {
+        'pid': ?pid,
+        'raw_log': ?rawLog,
+        'session_id': sessionId,
+        'observed_from': payload.eventName,
+        if (missing.isNotEmpty) 'why': missing.join('; '),
+      },
+      ts: _clock(),
+    );
+  }
+
+  /// Records that a hook-observed subagent's process cannot be named.
+  ///
+  /// **It carries no `pid` and no `raw_log`, and that is the entire point.**
+  /// Both fields are available in the payload and both would be the *root's*:
+  /// there is one process per `claude -p` (`17` §2), and `transcript_path` is
+  /// the root session's `.jsonl` even inside a subagent (`17` §3). Writing
+  /// either would give a child its parent's liveness — a wedged subagent under
+  /// a busy root would read as healthy, and every subagent of a dead session
+  /// would page separately about the one process that died.
+  ///
+  /// So this row exists only to say *what could not be looked at*, in a
+  /// sentence that reaches the human verbatim through the verdict's `because`.
+  /// A node with no record at all would read as never started, which is
+  /// `abandoned`, which rings — about a subagent that is very likely working
+  /// perfectly well inside a session somebody is watching.
+  ///
+  /// The subagent's own transcript exists, at
+  /// `…/<session-id>/subagents/agent-<agent_id>.jsonl`, and both `SubagentStop`
+  /// captures in `hooks/B/` carry exactly that path — so it *could* be derived
+  /// for a running subagent. It deliberately is not; see the finding in
+  /// `docs/02-open-findings.md`, which records why deriving it is unsafe under
+  /// the measurement as it stands today.
+  void _recordSubagentProcess(
+    HookPayload payload,
+    String sessionId,
+    String agentId,
+  ) {
+    store.append(
+      nodeId: subagentNodeId(sessionId, agentId),
+      kind: observedProcessKind,
+      payload: {
+        'session_id': sessionId,
+        'agent_id': agentId,
+        'observed_from': payload.eventName,
+        // Kept as evidence, under a name no measurement reads. `pid` would be
+        // probed; this is here so a human debugging the feed can see which
+        // session's process this subagent was running inside.
+        'session_pid': ?_sessionPid(sessionId),
+        'why':
+            'a hook-observed subagent has no process of its own — one OS '
+            'process and one session_id per claude -p, however deep the tree '
+            "goes — and its own transcript is not in the payload, because "
+            "transcript_path is always the root session's and "
+            'agent_transcript_path arrives only on SubagentStop',
+      },
+      ts: _clock(),
+    );
+  }
+
+  /// The session's own pid, or null when it could not be established.
+  ///
+  /// Two ways it comes back null, and both are the honest answer rather than a
+  /// fallback: [claudePidEnvVariable] is absent or is not a number, or
+  /// [claudeSessionIdEnvVariable] is present and names a *different* session
+  /// than the payload does — in which case the environment and the bytes are
+  /// about two different processes and the pid belongs to neither this node nor
+  /// this projection.
+  int? _sessionPid(String sessionId) {
+    final envSession = environment[claudeSessionIdEnvVariable];
+    if (envSession != null && envSession != sessionId) return null;
+    final raw = environment[claudePidEnvVariable];
+    if (raw == null) return null;
+    return int.tryParse(raw.trim());
   }
 
   /// The prompt text of a `UserPromptSubmit`, or null when a machine wrote it.

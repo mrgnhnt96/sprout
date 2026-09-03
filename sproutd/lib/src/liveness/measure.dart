@@ -30,7 +30,36 @@ const Duration defaultFrozenAfter = Duration(minutes: 5);
 /// It is deliberately **not** symmetric. A process that started *after* the
 /// node recorded its pid is the recycled-pid case, and no tolerance forgives
 /// it — see [LivenessMeasure.startTimeTolerance].
+///
+/// **The rule transfers to [observedProcessKind] unchanged, and the reasoning
+/// is worth having written down because the next reader will wonder.** That
+/// record is written from a hook payload, and a `claude` process is already
+/// running by the time its own `SessionStart` hook fires — the hook is a child
+/// the session starts and waits for, and the pid it reports is the session's
+/// own (`CLAUDE_PID` is the hook shell's parent, measured). So on this path
+/// too the process predates the record of it, by more than on the runner path
+/// rather than less: sprout may only learn of a session hours after it began,
+/// when the hooks are installed mid-run. A start time *later* than the record
+/// still means the same thing it means for a spawn — at the moment sprout
+/// wrote the pid down, that pid was the session's, so a process wearing it
+/// that began afterwards is a different process.
 const Duration defaultStartTimeTolerance = Duration(seconds: 2);
+
+/// The event kinds that carry a node's `pid` and `raw_log`.
+///
+/// **Two ways in, one measurement.** [runnerSpawnedKind] is written by
+/// `SessionRunner` for a process sprout launched; [observedProcessKind] is
+/// written by `HookProjection` for a session sprout only ever saw through a
+/// hook. What the two mean about *provenance* is different, and that is why
+/// they are separate kinds — but what they mean about *liveness* is identical,
+/// a pid to probe beside a transcript to time, so everything below reads them
+/// through one path.
+///
+/// Forking that path was the alternative and it is the thing to avoid: two
+/// copies of the recycled-pid rule, the freeze threshold and the subtree rescue
+/// would agree on the day they were written and drift afterwards, which is
+/// F-01's shape. A set here costs one `contains`.
+const Set<String> spawnRecordKinds = {runnerSpawnedKind, observedProcessKind};
 
 /// The statuses that are honest endings, so not a liveness question.
 ///
@@ -154,22 +183,37 @@ final class LivenessMeasure {
       return _Reading(_Pulse.neverStarted, because: _whyNotStarted(node.id));
     }
 
-    final look = await processes.inspect(spawn.pid);
+    final pid = spawn.pid;
+    if (pid == null) {
+      // A record that names no process. The node was observed — something
+      // wrote this event about it — but there is nothing to probe, so this is
+      // a failed look and not a finding about the world. [Liveness.unmeasured]
+      // is what that is, and the alternative is the one thing this path must
+      // never do: page a human about a healthy subagent of a session they are
+      // sitting in front of.
+      return _Reading(
+        _Pulse.unreadable,
+        because:
+            'the ${spawn.kind} event for this node names no pid, so there is '
+            'no process to look at${spawn._note}',
+        spawnedAt: spawn.at,
+      );
+    }
+
+    final look = await processes.inspect(pid);
     switch (look) {
       case ProcessUnreadable(:final why):
         return _Reading(
           _Pulse.unreadable,
-          because: 'could not look at pid ${spawn.pid}: $why',
-          pid: spawn.pid,
+          because: 'could not look at pid $pid: $why',
+          pid: pid,
           spawnedAt: spawn.at,
         );
       case ProcessGone():
         return _Reading(
           _Pulse.gone,
-          because:
-              'no process holds pid ${spawn.pid}, and the node recorded no '
-              'ending',
-          pid: spawn.pid,
+          because: 'no process holds pid $pid, and the node recorded no ending',
+          pid: pid,
           spawnedAt: spawn.at,
         );
       case ProcessRunning(:final startedAt):
@@ -177,20 +221,21 @@ final class LivenessMeasure {
           return _Reading(
             _Pulse.recycled,
             because:
-                'pid ${spawn.pid} is alive but its process started at '
+                'pid $pid is alive but its process started at '
                 '$startedAt, after this node recorded it at ${spawn.at}, so '
                 'the pid was reused and that process is not ours',
-            pid: spawn.pid,
+            pid: pid,
             processStartedAt: startedAt,
             spawnedAt: spawn.at,
           );
         }
-        return _pulseFromTranscript(spawn, startedAt, now);
+        return _pulseFromTranscript(spawn, pid, startedAt, now);
     }
   }
 
   Future<_Reading> _pulseFromTranscript(
     _Spawn spawn,
+    int pid,
     DateTime startedAt,
     DateTime now,
   ) async {
@@ -198,9 +243,9 @@ final class LivenessMeasure {
       return _Reading(
         _Pulse.unreadable,
         because:
-            'the $runnerSpawnedKind event for pid ${spawn.pid} carries no '
-            'raw_log path, so there is no transcript to time',
-        pid: spawn.pid,
+            'the ${spawn.kind} event for pid $pid carries no raw_log path, '
+            'so there is no transcript to time${spawn._note}',
+        pid: pid,
         processStartedAt: startedAt,
         spawnedAt: spawn.at,
       );
@@ -214,7 +259,7 @@ final class LivenessMeasure {
         return _Reading(
           _Pulse.unreadable,
           because: 'could not stat the transcript $path: $why',
-          pid: spawn.pid,
+          pid: pid,
           processStartedAt: startedAt,
           spawnedAt: spawn.at,
         );
@@ -239,9 +284,9 @@ final class LivenessMeasure {
     return _Reading(
       pulse,
       because:
-          'pid ${spawn.pid} is alive and started at $startedAt; $what '
+          'pid $pid is alive and started at $startedAt; $what '
           '${_ago(frozenFor)} (threshold ${_ago(frozenAfter)})',
-      pid: spawn.pid,
+      pid: pid,
       processStartedAt: startedAt,
       spawnedAt: spawn.at,
       lastWrite: reference,
@@ -322,23 +367,38 @@ final class LivenessMeasure {
     return null;
   }
 
-  /// The newest `runner.spawned` for [nodeId], or null if it never started.
+  /// The newest spawn record for [nodeId], or null if it never started.
   ///
   /// Newest wins (§11). A node id that was launched twice has two spawn
   /// events, and the older one's pid is the one most likely to have been
   /// recycled — believing it is how a watchdog reports on a process that
   /// stopped existing hours ago.
+  ///
+  /// Any kind in [spawnRecordKinds] counts, and the kind that won is carried
+  /// on the result so that every sentence below names the event a human can
+  /// actually go and look at. Newest-wins is across the whole set rather than
+  /// per kind on purpose: a session sprout launched *and* has hooks installed
+  /// for produces both, and the two describe one process — taking the newer is
+  /// the same rule as taking the newer of two launches.
+  ///
+  /// **A record with no `pid` is kept, not skipped.** It is the honest shape
+  /// for a node whose process sprout cannot name — a hook-observed subagent,
+  /// which has no process of its own — and skipping it would report the node
+  /// as never having started, which is [Liveness.abandoned] and pages. A
+  /// `runner.spawned` always carries one, so nothing on that path changes.
   _Spawn? _newestSpawn(String nodeId) {
     _Spawn? newest;
     for (final event in store.eventsSince(0, nodeId: nodeId)) {
-      if (event.kind != runnerSpawnedKind) continue;
+      if (!spawnRecordKinds.contains(event.kind)) continue;
       final pid = event.payload['pid'];
-      if (pid is! int) continue;
       final rawLog = event.payload['raw_log'];
+      final why = event.payload['why'];
       newest = _Spawn(
-        pid: pid,
+        kind: event.kind,
+        pid: pid is int ? pid : null,
         at: event.ts,
         rawLog: rawLog is String ? rawLog : null,
+        why: why is String ? why : null,
       );
     }
     return newest;
@@ -356,7 +416,8 @@ final class LivenessMeasure {
             '(${event.payload['error']})';
       }
     }
-    return 'no $runnerSpawnedKind event for this node, and no ending recorded';
+    return 'no ${spawnRecordKinds.join(' or ')} event for this node, and no '
+        'ending recorded';
   }
 
   static String _ago(Duration d) {
@@ -366,13 +427,33 @@ final class LivenessMeasure {
   }
 }
 
-/// The newest launch recorded for a node.
+/// The newest process record for a node, from either of [spawnRecordKinds].
 final class _Spawn {
-  const _Spawn({required this.pid, required this.at, required this.rawLog});
+  const _Spawn({
+    required this.kind,
+    required this.pid,
+    required this.at,
+    required this.rawLog,
+    required this.why,
+  });
 
-  final int pid;
+  /// Which of [spawnRecordKinds] this came from, so a `because` can name the
+  /// event a human would go and read.
+  final String kind;
+
+  /// The process to probe, or null when the record could not name one.
+  final int? pid;
+
   final DateTime at;
   final String? rawLog;
+
+  /// The producer's own sentence about what it could not establish, when it
+  /// wrote one. Carried into the verdict rather than restated here: the
+  /// producer knows why, and this file would have to guess.
+  final String? why;
+
+  /// The producer's sentence, ready to append to a measurement's own.
+  String get _note => why == null ? '' : ': $why';
 }
 
 /// A node's own pulse, before its subtree is consulted.

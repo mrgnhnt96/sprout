@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:sproutd/acceptance.dart';
 import 'package:sproutd/hooks.dart';
 import 'package:sproutd/liveness.dart';
 import 'package:sproutd/protocol.dart';
@@ -1099,6 +1100,65 @@ void main() {
           runnerLaunchFailedKind,
           runnerSessionKind,
           runnerExitedKind,
+        }),
+        isEmpty,
+      );
+    });
+  });
+
+  group('and so are the acceptance event kinds', () {
+    // P4-06. The parent's per-return judgement of one child against the
+    // machine-checkable success condition its brief carried, declared once in
+    // `package:sprout_protocol` for the reason F-11 and F-12 each cost a leaf.
+
+    test('the three keep their spelling', () {
+      expect(acceptanceAcceptedKind, 'acceptance.accepted');
+      expect(acceptanceRejectedKind, 'acceptance.rejected');
+      expect(acceptanceUndecidableKind, 'acceptance.undecidable');
+      expect(acceptanceKindPrefix, 'acceptance.');
+    });
+
+    test('undecidable is a kind of its own, not a rejection with a flag', () {
+      // The distinction the leaf exists to hold, pinned at the wire. A single
+      // `acceptance.judged` carrying `accepted: true|false` would leave a
+      // consumer that never learned about the third state reading every
+      // failure-to-look as a verdict — which is the one direction the mistake
+      // must not go (INV8).
+      expect(acceptanceUndecidableKind, isNot(acceptanceRejectedKind));
+      expect(acceptanceUndecidableKind, isNot(acceptanceAcceptedKind));
+      expect(acceptanceAcceptedKind, isNot(acceptanceRejectedKind));
+    });
+
+    test('all three carry the prefix and none is another path\'s kind', () {
+      final acceptanceKinds = {
+        acceptanceAcceptedKind,
+        acceptanceRejectedKind,
+        acceptanceUndecidableKind,
+      };
+      expect(acceptanceKinds, hasLength(3));
+      for (final kind in acceptanceKinds) {
+        expect(kind, startsWith(acceptanceKindPrefix));
+        expect(kind, isNot(startsWith(hookKindPrefix)));
+        expect(kind, isNot(startsWith(frameKindPrefix)));
+        expect(kind, isNot(startsWith(worktreeKindPrefix)));
+        expect(kind, isNot(startsWith('runner.')));
+      }
+      expect(
+        acceptanceKinds.intersection({
+          ...hookKindsByEventName.values,
+          hookUnknownKind,
+          hookMalformedKind,
+          observedProcessKind,
+          nodeObservedKind,
+          nodeUpdatedKind,
+          runnerSpawnedKind,
+          runnerRefusedKind,
+          runnerLaunchFailedKind,
+          runnerSessionKind,
+          runnerExitedKind,
+          worktreeCreatedKind,
+          worktreeRemovedKind,
+          worktreeKeptKind,
         }),
         isEmpty,
       );

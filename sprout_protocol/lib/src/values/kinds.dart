@@ -380,3 +380,65 @@ const String worktreeRemovedKind = '${worktreeKindPrefix}removed';
 /// `git status` is not evidence of a clean tree, and folding the two together
 /// is how a check whose pass is silence deletes somebody's only copy (INV8).
 const String worktreeKeptKind = '${worktreeKindPrefix}kept';
+
+/// The prefix on every kind recording a **parent's acceptance check** of what
+/// one child returned.
+///
+/// Its own prefix rather than a `runner.*` kind, on [worktreeKindPrefix]'s
+/// argument: a `runner.*` row is about the process — it started, it was
+/// refused, it exited — and none of those say whether the work was any good.
+/// This is the judgement made *after* the process is gone, against the
+/// machine-checkable condition the brief carried, and a reader that took it
+/// for a lifecycle row would be wrong about all three.
+///
+/// `docs/01-plan.md` §2.5 is why there are three kinds and no fourth carrying a
+/// number: DELEGATE-52 measured degradation as **sparse and catastrophic**
+/// rather than diffuse — near-perfect reconstruction, then 10–30 points lost in
+/// a single round trip, with those sparse failures explaining ~80% of total
+/// degradation — so the decision was *"no trend gauge. A per-return acceptance
+/// check by the parent, against the brief it wrote."* There is deliberately no
+/// score, no rolling average and nothing a board could plot over time.
+const String acceptanceKindPrefix = 'acceptance.';
+
+/// The event appended when every declared success condition passed and the
+/// child's subtree had drained.
+///
+/// The **positive control** INV8 asks for, and the reason acceptance is on the
+/// feed at all rather than only its refusals: a check that wrote a row only
+/// when it said no could not be told from one that never ran. The payload
+/// carries every condition that was run with the exit code it produced, plus
+/// the running `counts`.
+///
+/// **Not a claim that the child's process succeeded.** sprout does not decide
+/// this on an exit code (INV12) — a zero exit with no result is a session that
+/// died before answering, and a non-zero exit after a real answer is not a
+/// failure of the work. The exit code is in the payload and decides nothing.
+const String acceptanceAcceptedKind = '${acceptanceKindPrefix}accepted';
+
+/// The event appended when sprout looked, and the answer was no.
+///
+/// A definite finding: a condition ran and exited non-zero, the child never
+/// produced a result, or its subtree had not drained. The payload carries
+/// `reason` — one of the wire strings on the rejection enum — an `explanation`
+/// a human can act on, and the conditions that were run.
+///
+/// Distinct from [acceptanceUndecidableKind] the way [worktreeKeptKind]'s
+/// `unreadable` is distinct from its `uncommittedChanges`: one is an
+/// observation, the other is a failure to observe, and folding them together is
+/// how a check whose pass is silence starts deciding things (INV8).
+const String acceptanceRejectedKind = '${acceptanceKindPrefix}rejected';
+
+/// The event appended when sprout **could not evaluate** the condition it was
+/// given.
+///
+/// The executable was not there, the working directory was gone, the process
+/// could not be forked. That is not a pass and it is not a failure — *"a pass
+/// that is silence proves nothing on its own"* (INV8) — and a run that folded
+/// it into either would be reporting a judgement it never made. The payload
+/// carries `reason`, an `explanation` naming the command and what went wrong,
+/// and the conditions that were attempted.
+///
+/// A child whose acceptance is undecidable keeps its worktree, exactly as a
+/// rejected one does. The two are different rows because they are different
+/// facts, and only one of them means the work was looked at.
+const String acceptanceUndecidableKind = '${acceptanceKindPrefix}undecidable';

@@ -100,6 +100,17 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// order is one nobody can diff, and a guard over a corner of another library
 /// would cover whichever files happened to sit beside it.
 ///
+/// `acceptance` is P4-06's: the parent's per-return check of one child against
+/// the machine-checkable `SuccessCondition` its brief carried, and the tally of
+/// what it answered. It is its own area rather than a corner of either
+/// neighbour, and both refusals matter. It cannot live in `decomposition`,
+/// whose whole promise is purity — `test/decomposition_test.dart` greps that
+/// directory and asserts `dart:io` appears nowhere in it, and running a
+/// declared command is this area's entire job. It cannot live in `runner`
+/// either, and that one is the plan's own argument rather than a structural
+/// one: `docs/01-plan.md` §2.4 decided deterministic verification precisely so
+/// that the thing producing an artifact is never the thing judging it.
+///
 const libraries = {
   'store',
   'stream',
@@ -114,6 +125,7 @@ const libraries = {
   'hooks',
   'worktree',
   'decomposition',
+  'acceptance',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

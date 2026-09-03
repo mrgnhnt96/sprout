@@ -29,12 +29,21 @@
 /// would have destroyed work — and a board branching on them reads them off the
 /// same socket as everything else.
 ///
+/// The `acceptance.*` kinds are P4-06's, and are the fourth. They record the
+/// parent's per-return judgement of one child against the machine-checkable
+/// success condition its brief carried (`docs/01-plan.md` §2.4, §2.5) — three
+/// kinds, because *undecidable* is not a variety of rejected.
+///
 /// Implementation lives under `lib/src/values/`.
 library;
 
 export 'src/values/event.dart' show SproutEvent;
 export 'src/values/kinds.dart'
     show
+        acceptanceAcceptedKind,
+        acceptanceKindPrefix,
+        acceptanceRejectedKind,
+        acceptanceUndecidableKind,
         hookKindForEventName,
         hookKindPrefix,
         hookKindsByEventName,

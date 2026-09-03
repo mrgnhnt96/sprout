@@ -2,7 +2,9 @@
 ///
 /// These are sprout's own states, not control-plane facts, so INV10 does not
 /// apply: nothing here is read off a Claude Code frame. The names track §5's
-/// spawn → work → three honest endings, plus the one human-only exit.
+/// spawn → work → three honest endings, plus the one human-only exit — and
+/// [unlaunched], which is none of those, because a spawn sprout refused or
+/// could not start has a row and no process and §5 has no word for that.
 ///
 /// **Liveness is deliberately absent.** §5 is explicit that live / stalled /
 /// abandoned is *derived* from a pid beside a transcript mtime, and that a
@@ -11,6 +13,54 @@
 enum NodeStatus {
   /// The process has been asked for but has not reported in yet.
   spawning('spawning'),
+
+  /// The process was never started, and never will be.
+  ///
+  /// **Not a fourth ending.** `docs/01-plan.md` §5's three honest endings —
+  /// checkpoint, arm, clear — and the human-only `park` all describe how *work*
+  /// finished. This one says the work never began: `SessionRunner.launch`
+  /// writes the row before it asks the containment gate, so that a refusal is
+  /// counted against a node the feed has described (INV14), and then either the
+  /// gate refuses or the launcher throws. Both leave a row with no process
+  /// behind it, and sprout knows that in the same function that wrote the row.
+  ///
+  /// **It exists because leaving such a row [spawning] is a denial of service.**
+  /// `isHoldingStatus` counts `spawning` and `working` against
+  /// `SpendLedger.liveNodes` and `liveChildrenOf`, so before P4-09 five
+  /// refusals under one parent closed that parent to every further spawn and
+  /// twelve anywhere in the store closed the whole tree — refusing for
+  /// `RefusalReason.concurrency`, correctly by sprout's own rules and wrongly
+  /// in fact, with nothing running at all. Hitting the depth cap is not an
+  /// error condition; it is what the cap is for, so it must not cost anything.
+  ///
+  /// **Why a new value rather than an existing one.** None of the others is
+  /// honest here and stretching one would put a false sentence in the row for
+  /// ever: [checkpointed] means *handed back with progress* and a node that
+  /// never ran has no progress, [cleared] claims proof, [armed] claims a
+  /// question, and [parked] is the developer's call and "never the agent's
+  /// judgement". F-17 is the same absence one layer over — there is still no
+  /// status meaning *the process ran and is now gone* — and this deliberately
+  /// does not answer it: a session that really started is a different fact and
+  /// needs a liveness measurement, which this case does not.
+  ///
+  /// **The cost, stated rather than waved past.** This is wire vocabulary. The
+  /// string below is in the `status` column of every database written from here
+  /// on, the feed is append-only by schema trigger, and [fromWire] throws on a
+  /// value it does not know rather than defaulting — so an *older* binary
+  /// reading a *newer* database throws on this row. That is the price, and it
+  /// is one-directional: adding a value cannot break a reader that is at least
+  /// as new as the writer, which is the direction that actually happens. A
+  /// rename later would be the unfixable one, so [wire] is pinned literally in
+  /// `sproutd/test/protocol_test.dart` beside the event kinds.
+  ///
+  /// **Why it is not in `endedStatuses`.** That set short-circuits the liveness
+  /// sweep with `the node ended: <status>`. A node that never started has a
+  /// better answer already: `LivenessMeasure` finds no spawn record and reports
+  /// *"no process was ever started: the containment gate refused the launch"*
+  /// with the gate's own explanation, which is strictly more use to a human
+  /// than the status name. Nothing about the concurrency repair needs that to
+  /// change, so it does not.
+  unlaunched('unlaunched'),
 
   /// Running, with a bound mandate.
   working('working'),

@@ -223,15 +223,21 @@ void main() {
       expect(events('root').map((e) => e.kind), [
         nodeObservedKind,
         'runner.refused',
+        // And then off `spawning` again, in the same breath as the refusal.
+        // Until P4-09 this list ended at the refusal and the row stayed
+        // `spawning` for ever, which made a spawn nothing ever started count
+        // against the concurrency bound. See the P4-09 group below.
+        nodeUpdatedKind,
       ]);
-      final recorded = events('root').last;
+      final recorded = events('root')
+          .firstWhere((e) => e.kind == runnerRefusedKind);
       expect(recorded.payload['reason'], 'budget');
       expect(recorded.payload['refusals'], {
         'depthCap': 0,
         'budget': 1,
         'concurrency': 0,
       });
-      expect(store.node('root')!.status, NodeStatus.spawning);
+      expect(store.node('root')!.status, NodeStatus.unlaunched);
     });
 
     test('a permit starts exactly one process at depth 0', () async {
@@ -269,7 +275,11 @@ void main() {
         expect(events('root').map((e) => e.kind), [
           nodeObservedKind,
           'runner.launch_failed',
+          nodeUpdatedKind,
         ]);
+        // Same repair as the refusal above: nothing was started, so the row
+        // must not go on holding a slot.
+        expect(store.node('root')!.status, NodeStatus.unlaunched);
       },
     );
   });
@@ -352,8 +362,10 @@ void main() {
         expect(refusal.explanation, contains('depth 4'));
         expect(gate.refusals[RefusalReason.depthCap], 1);
 
-        final recorded = events('child').last;
-        expect(recorded.kind, runnerRefusedKind);
+        // Not `.last`: since P4-09 the refusal is followed by the
+        // `runner.updated` that moves the row off `spawning`.
+        final recorded = events('child')
+            .firstWhere((e) => e.kind == runnerRefusedKind);
         expect(recorded.payload['reason'], 'depthCap');
         expect(recorded.payload['refusals'], {
           'depthCap': 1,
@@ -415,7 +427,12 @@ void main() {
           expect(refusal.reason, RefusalReason.budget);
           expect(refusal.explanation, contains('subtree under parent'));
           expect(gate.refusals[RefusalReason.budget], 1);
-          expect(events('child').last.payload['reason'], 'budget');
+          expect(
+            events('child')
+                .firstWhere((e) => e.kind == runnerRefusedKind)
+                .payload['reason'],
+            'budget',
+          );
         },
       );
 
@@ -464,7 +481,12 @@ void main() {
         expect(refusal.reason, RefusalReason.concurrency);
         expect(refusal.explanation, contains('$defaultMaxLiveChildren'));
         expect(gate.refusals[RefusalReason.concurrency], 1);
-        expect(events('child').last.payload['reason'], 'concurrency');
+        expect(
+          events('child')
+              .firstWhere((e) => e.kind == runnerRefusedKind)
+              .payload['reason'],
+          'concurrency',
+        );
       });
 
       test(
@@ -548,6 +570,195 @@ void main() {
           expect(double.parse(live.launch.arguments.last), closeTo(0.25, 1e-9));
         },
       );
+    });
+  });
+  group('a refused spawn does not hold a concurrency slot', () {
+    // P4-09, and it is the opposite case to F-24 rather than a variant of it.
+    // F-24 is a session that really started and whose ending sprout cannot
+    // observe, so repairing it means deciding who may reconcile a row against
+    // a liveness measurement. Here sprout wrote the row and then refused the
+    // launch **itself, in the same function**: nothing was ever started and
+    // the code that knows it is right there, so there is no measurement to
+    // take and no uncertainty to resolve.
+    //
+    // The row still has to exist — it is written before the gate is asked so
+    // that a refusal is counted against a node the feed has described (INV14),
+    // and a tally held only in memory dies with the daemon. What it must not
+    // do is keep counting as live for ever.
+
+    void put(
+      String id, {
+      String? parentId,
+      NodeStatus status = NodeStatus.checkpointed,
+    }) => store.putNode(
+      SproutNode(id: id, parentId: parentId, project: tmp.path, status: status),
+    );
+
+    SpendLedger storeLedger() => readLedger(StoreSnapshotSource(store)).ledger;
+
+    /// n0 → n1 → n2 → n3, so any child of n3 sits at depth 4 and is refused.
+    void chainOfFour() {
+      put('n0');
+      put('n1', parentId: 'n0');
+      put('n2', parentId: 'n1');
+      put('n3', parentId: 'n2');
+    }
+
+    /// Asks for [nodeId] under `n3` and insists the depth cap refused it.
+    Future<void> refuseAtDepth(String nodeId) async {
+      final launcher = FakeLauncher();
+      final start = await runner(launcher).launch(
+        request(nodeId: nodeId, parentId: 'n3'),
+        ledger: storeLedger(),
+      );
+      expect(start, isA<RefusedSession>());
+      expect((start as RefusedSession).refusal.reason, RefusalReason.depthCap);
+      // The half a tally cannot show: no process was started.
+      expect(launcher.launches, isEmpty);
+    }
+
+    test('the row it leaves behind is not counted by the ledger', () async {
+      chainOfFour();
+      await refuseAtDepth('refused');
+
+      expect(isHoldingStatus(store.node('refused')!.status), isFalse);
+      final ledger = storeLedger();
+      expect(ledger.liveNodes, 0);
+      expect(ledger.liveChildrenOf('n3'), 0);
+    });
+
+    test('and the status moves where the refusal is recorded, so the feed '
+        'carries both', () async {
+      chainOfFour();
+      await refuseAtDepth('refused');
+      // Observed, refused, and moved off `spawning` — in that order and in
+      // one call, so a consumer built from deltas alone cannot be left
+      // showing a node that is spawning for ever.
+      expect(events('refused').map((e) => e.kind), [
+        nodeObservedKind,
+        runnerRefusedKind,
+        nodeUpdatedKind,
+      ]);
+      final patch = events('refused').last.payload['status']! as Map;
+      expect(patch['from'], 'spawning');
+      expect(patch['to'], store.node('refused')!.status.wire);
+    });
+
+    test('it is not announced as holding the project directory it never '
+        'entered', () async {
+      chainOfFour();
+      await refuseAtDepth('refused');
+      expect(
+        heldResourcesOf(store.nodes()).map((r) => r.holder),
+        isNot(contains('refused')),
+      );
+    });
+
+    test('a launch that never started holds nothing either', () async {
+      final launcher = FakeLauncher()
+        ..failWith = const ProcessException('claude', ['-p'], 'not found');
+      await expectLater(
+        runner(launcher).launch(request(nodeId: 'never')),
+        throwsA(isA<ProcessException>()),
+      );
+      // Same shape, same file, same function: the row exists and nothing is
+      // running, and sprout knows it without measuring anything.
+      expect(isHoldingStatus(store.node('never')!.status), isFalse);
+      expect(storeLedger().liveNodes, 0);
+      expect(events('never').map((e) => e.kind), [
+        nodeObservedKind,
+        runnerLaunchFailedKind,
+        nodeUpdatedKind,
+      ]);
+    });
+
+    test('so five refusals under one parent do not close that parent to a '
+        'legitimate spawn', () async {
+      put('p');
+      // Five children refused for BUDGET — nothing to do with concurrency,
+      // and none of them started a process.
+      for (var i = 0; i < 5; i++) {
+        final launcher = FakeLauncher();
+        final start = await runner(launcher).launch(
+          request(nodeId: 'over$i', parentId: 'p', estimate: 3),
+          ledger: storeLedger(),
+        );
+        expect((start as RefusedSession).refusal.reason, RefusalReason.budget);
+        expect(launcher.launches, isEmpty);
+      }
+      expect(gate.refusals[RefusalReason.budget], 5);
+
+      // Now an ordinary child of an ordinary parent. Before this fix the five
+      // rows above were still `spawning`, so `liveChildrenOf('p')` read 5
+      // against a limit of 4 and this was refused for `concurrency` — a
+      // denial of service sprout inflicted on itself with nothing running at
+      // all, and the depth cap doing exactly what it is for.
+      final launcher = FakeLauncher()..queue.add(FakeProcess());
+      final start = await runner(launcher).launch(
+        request(nodeId: 'ordinary', parentId: 'p'),
+        ledger: storeLedger(),
+      );
+      expect(
+        start,
+        isA<LiveSession>(),
+        reason: start is RefusedSession
+            ? 'refused for ${start.refusal.reason.wire}: '
+                  '${start.refusal.explanation}'
+            : 'the parent was closed by its own refusals',
+      );
+      expect(launcher.launches, hasLength(1));
+    });
+
+    test('and twelve of them anywhere do not close the whole tree', () async {
+      for (var i = 0; i < 12; i++) {
+        final start = await runner(
+          FakeLauncher(),
+        ).launch(request(nodeId: 'root$i', estimate: 3), ledger: storeLedger());
+        expect((start as RefusedSession).refusal.reason, RefusalReason.budget);
+      }
+      final start = await runner(FakeLauncher()..queue.add(FakeProcess()))
+          .launch(request(nodeId: 'ordinary'), ledger: storeLedger());
+      expect(
+        start,
+        isA<LiveSession>(),
+        reason: start is RefusedSession
+            ? 'refused for ${start.refusal.reason.wire}: '
+                  '${start.refusal.explanation}'
+            : 'the tree was closed by refusals nothing ever launched',
+      );
+    });
+
+    test('but a node that really launched still holds its slot, and the '
+        'bound still bites', () async {
+      put('p');
+      // Four children that really started a process and really reported a
+      // frame, so each is `working` rather than merely written down.
+      for (var i = 0; i < 4; i++) {
+        final launcher = _replaying(utf8.encode('{"type":"system"}\n'));
+        final start = await runner(launcher).launch(
+          request(nodeId: 'live$i', parentId: 'p'),
+          ledger: storeLedger(),
+        );
+        expect(launcher.launches, hasLength(1));
+        await (start as LiveSession).done;
+        expect(store.node('live$i')!.status, NodeStatus.working);
+      }
+      expect(storeLedger().liveChildrenOf('p'), 4);
+
+      // The fifth is refused, which is the bound doing its job. This is the
+      // positive control: the repair above must not have made concurrency
+      // stop biting, and that bound only became real in P4-02.
+      final launcher = FakeLauncher();
+      final start = await runner(launcher).launch(
+        request(nodeId: 'fifth', parentId: 'p'),
+        ledger: storeLedger(),
+      );
+      expect(start, isA<RefusedSession>());
+      expect(
+        (start as RefusedSession).refusal.reason,
+        RefusalReason.concurrency,
+      );
+      expect(launcher.launches, isEmpty);
     });
   });
 

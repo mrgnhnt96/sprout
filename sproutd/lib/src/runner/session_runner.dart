@@ -221,6 +221,7 @@ final class SessionRunner {
           },
           ts: now,
         );
+        _neverStarted(nodeId, now);
         return RefusedSession(nodeId: nodeId, refusal: decision);
       case SpawnPermit():
         permit = decision;
@@ -240,12 +241,18 @@ final class SessionRunner {
     try {
       process = await launcher.launch(launch);
     } on Object catch (error) {
+      final at = _clock();
       store.append(
         nodeId: nodeId,
         kind: runnerLaunchFailedKind,
         payload: {'error': error.toString(), 'launch': launch.toJson()},
-        ts: _clock(),
+        ts: at,
       );
+      // The same shape as a refusal and so the same repair: the row is here,
+      // nothing is running, and this function knows it. Left `spawning` it
+      // would hold a slot exactly as a refusal did — `claude` missing from
+      // `PATH` twelve times would close the whole tree.
+      _neverStarted(nodeId, at);
       rethrow;
     }
 
@@ -283,6 +290,32 @@ final class SessionRunner {
     );
     unawaited(session._pump());
     return session;
+  }
+
+  /// Moves [nodeId] to [NodeStatus.unlaunched], because no process was started.
+  ///
+  /// Called from the two places in [launch] that end without a process — the
+  /// gate's refusal and the launcher throwing — and **from beside the event
+  /// that records each**, so the row and the feed cannot drift into disagreeing
+  /// about whether anything ran.
+  ///
+  /// That was P4-09. The row is written before the gate is asked, on purpose
+  /// (INV14: sprout counts its own refusals, and a tally held only in memory
+  /// dies with the daemon), and until this it stayed `spawning` for ever — so
+  /// `isHoldingStatus` counted a spawn that never happened against
+  /// `SpendLedger.liveNodes` and `liveChildrenOf`, and five refusals under one
+  /// parent closed that parent to every further spawn. Hitting the depth cap is
+  /// what the cap is for; it must not cost a slot.
+  ///
+  /// **No measurement is taken and none is needed.** This is not F-24, where a
+  /// session really started and its ending cannot be observed; the launch was
+  /// declined or failed in this function, three lines up. `putNode` appends the
+  /// `runner.updated` patch itself, so a consumer built from deltas alone sees
+  /// the node leave `spawning` rather than being left showing it for ever.
+  void _neverStarted(String nodeId, DateTime at) {
+    final node = store.node(nodeId);
+    if (node == null) return;
+    store.putNode(node.copyWith(status: NodeStatus.unlaunched), ts: at);
   }
 }
 

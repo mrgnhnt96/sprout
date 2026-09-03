@@ -812,6 +812,58 @@ void main() {
     });
   });
 
+  group('and so is the node status vocabulary', () {
+    // `NodeStatus.wire` is the `status` column of every `node` row sprout has
+    // ever written, it travels over the socket inside a snapshot and inside a
+    // `runner.updated` patch, and the browser parses it back with
+    // `NodeStatus.fromWire` — which throws on a value it does not know rather
+    // than defaulting, deliberately, so that a drifted schema is loud.
+    //
+    // What no type can check is still the VALUE, so these are literal. A
+    // RENAME here is the unfixable change: the feed is append-only by schema
+    // trigger, there is no rewrite path, and a reader taught a new spelling
+    // would quietly stop recognising history it already holds.
+    //
+    // An ADDITION is the survivable one, and P4-09 made the first: a newer
+    // reader still understands every older row, and only an older binary
+    // reading a newer database throws. The set is asserted whole below so that
+    // adding one is a deliberate act with a line in a diff, not a side effect.
+
+    test('every status keeps its spelling', () {
+      expect(
+        {for (final status in NodeStatus.values) status.name: status.wire},
+        {
+          'spawning': 'spawning',
+          'unlaunched': 'unlaunched',
+          'working': 'working',
+          'checkpointed': 'checkpointed',
+          'armed': 'armed',
+          'cleared': 'cleared',
+          'parked': 'parked',
+        },
+      );
+    });
+
+    test('and the set is closed, so a new one cannot arrive unnoticed', () {
+      // The half the map above cannot do on its own: it would still pass with
+      // an eighth member if someone added it to both sides. Old databases hold
+      // exactly the first seven, and `fromWire` throws on anything else — so
+      // the count is the thing a reader of a newer feed pays for.
+      expect(NodeStatus.values, hasLength(7));
+      expect(
+        () => NodeStatus.fromWire('refused'),
+        throwsA(isA<ArgumentError>()),
+        reason: 'an unknown status must throw, never default',
+      );
+    });
+
+    test('unlaunched round-trips, so a refused spawn survives the wire', () {
+      // P4-09's row: written, refused, moved off `spawning`, and read back by
+      // a consumer that was not the writer.
+      expect(NodeStatus.fromWire('unlaunched'), NodeStatus.unlaunched);
+    });
+  });
+
   group('and so are the runner event kinds', () {
     // The same argument as the group above, one library later. These five are
     // what `SessionRunner` and `StoreProjection` append around a launch, and

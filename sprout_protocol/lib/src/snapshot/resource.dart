@@ -96,8 +96,16 @@ List<HeldResource> heldResourcesOf(Iterable<SproutNode> nodes) {
 /// Whether a node in [status] still occupies its project directory.
 ///
 /// The three ending states and `parked` do not: the process is gone, or the
-/// developer stopped it. Liveness proper — live / stalled / abandoned — is a
-/// pid beside a transcript mtime and is Phase 6's; this is the coarser fact
-/// the store already holds, and it is deliberately not called liveness.
+/// developer stopped it. Neither does [NodeStatus.unlaunched], where the
+/// process was never started at all — that was P4-09, and it is what stops a
+/// spawn the containment gate refused from announcing a worktree sprout tore
+/// down seconds earlier, and from counting against the concurrency bound for
+/// ever. Liveness proper — live / stalled / abandoned — is a pid beside a
+/// transcript mtime and is Phase 6's; this is the coarser fact the store
+/// already holds, and it is deliberately not called liveness.
+///
+/// **This list is deliberately not widened.** It names the two statuses that
+/// hold, so a status added later holds nothing until someone says otherwise
+/// here, on purpose.
 bool isHoldingStatus(NodeStatus status) =>
     status == NodeStatus.spawning || status == NodeStatus.working;

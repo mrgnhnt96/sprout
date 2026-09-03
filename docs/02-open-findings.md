@@ -179,6 +179,17 @@ throws on a value it does not know rather than defaulting, and the browser branc
 strings. That is a `sprout_protocol` change owing four commands and a decision about what old
 readers do with a status they have never seen — not a line in a projection.
 
+**P4-09 has since paid that price once, for a different fact.** `NodeStatus.unlaunched` was added
+for *the process was never started* — a refused or failed launch — because leaving such a row
+`spawning` was a denial of service on the normal path. So the cost is now measured rather than
+estimated: an older binary reading a newer database throws (`not a known node status:
+"unlaunched"`, exit 255, captured in `.showrunner/p4-09-refused-holds-slot-real-run.md`), the four
+owed commands were run, and `sprout_ui` needed no change because it renders `status.wire` as a
+`data-status` attribute and no stylesheet branches on the value. **None of that answers F-17**: a
+session whose `SessionEnd` has fired really ran, and `unlaunched` would be false about it. What it
+does remove is the argument that the enum can never be touched — the remaining question is only
+what the right word is and who is allowed to write it.
+
 **What is NOT wrong here.** Nothing is lost: the `hook.SessionEnd` event is in the feed with its
 `reason`, so a consumer that needs the distinction today can read it. Only the *row* is lossy.
 
@@ -300,12 +311,17 @@ The concurrency bounds became real in P4-02 — before it they were judged again
 and could not bite. Their denominator is `SpendLedger.liveNodes` and `liveChildrenOf`, which count
 every node whose status `isHoldingStatus`: `spawning` or `working`.
 
-Only three things ever move a node off those statuses, and each needs evidence from a stream that
-ended cleanly — `SessionRunner` marks a root `checkpointed` only when the transcript carries a
-`result` (INV12: exit is not completion), `StoreProjection` marks a subagent `checkpointed` on its
+**Narrowed by P4-09, not repaired.** There is a fourth writer now: `SessionRunner.launch` moves a
+node to `NodeStatus.unlaunched` when the containment gate refuses the spawn or the launcher throws,
+beside the `runner.refused` / `runner.launch_failed` it records. That case never needed a
+measurement — sprout wrote the row and declined the launch in the same function — and it is gone.
+**What is left of F-24 is exactly the hard half**: a session that really started and really died.
+
+For that half the other three writers stand, and each needs evidence from a stream that ended
+cleanly — `SessionRunner` marks a root `checkpointed` only when the transcript carries a `result`
+(INV12: exit is not completion), `StoreProjection` marks a subagent `checkpointed` on its
 `completed` lifecycle event, and `HookProjection` does the same on `SessionEnd` / `Stop`. Nothing
-reaps. The watchdog measures and rings and is forbidden from acting, and `grep putNode lib/ bin/
-routes/` finds no fourth writer.
+reaps. The watchdog measures and rings and is forbidden from acting.
 
 So a session killed mid-stream — a closed terminal, a machine that slept, a `claude` that
 segfaulted — leaves a row that reads `working` forever. Twelve of those across a week reach
@@ -332,11 +348,47 @@ files, on unmerged commits and on a look that failed. What is missing is the cal
 `repository`) precisely so that a later process can find the worktree without having created it.
 
 This compounds with **F-17**, which is the same absence one layer down: there is no `NodeStatus`
-meaning *the process is gone*, so even a human reading the board cannot tell a paused session from
-a dead one. Phase 6's `liveness` already derives live / stalled / abandoned from a pid beside a
+meaning *the process ran and is now gone*, so even a human reading the board cannot tell a paused
+session from a dead one. P4-09 added `unlaunched` for the *never began* case and deliberately did
+not stretch it over this one — a node that ran has a transcript, a pid and possibly work on disk,
+and calling it "unlaunched" would be false. Phase 6's `liveness` already derives live / stalled / abandoned from a pid beside a
 transcript mtime and is the obvious source of truth — but it may never act on what it finds, by
 design, so the repair is a decision about who is allowed to reconcile a row with a measurement, not
 a line in a projection.
+
+---
+
+### F-32 — A refused spawn is not an "ended" status, so the watchdog rings `abandoned` about it for ever
+
+**Status: OPEN.** Found by P4-09, which added the status the question is about, and deliberately
+left the watchdog alone.
+
+`endedStatuses` in `sproutd/lib/src/liveness/measure.dart` short-circuits the liveness sweep with
+*"the node ended: &lt;status&gt;"*. It holds `checkpointed`, `armed`, `cleared`, `parked` — the
+three honest endings and the human-only exit — and P4-09 did **not** add `unlaunched` to it. So a
+node the containment gate refused falls through to `_newestSpawn`, finds no spawn record, reads
+`_Pulse.neverStarted`, and `_resolve` returns `Liveness.abandoned`. `ringingVerdicts` in
+`watchdog/contradiction.dart` is `{stalled, abandoned}`, so it rings.
+
+**This is unchanged behaviour, not a regression**: before P4-09 the same row was `spawning` and
+took the identical path. It is recorded now because the fix made the alternative available and the
+choice is a real one.
+
+The argument for leaving it: the sweep's answer is *better* than the status. `_whyNotStarted`
+quotes the gate — *"no process was ever started: the containment gate refused the launch (This
+child would sit at depth 4, past sprout's depth cap of 3 …)"* — and adding `unlaunched` to
+`endedStatuses` would replace that sentence with "the node ended: unlaunched" and silence the ring
+with it.
+
+The argument against: hitting the depth cap is not an error condition, and a run that legitimately
+trips it twelve times now pages a human twelve times about twelve nodes that are working exactly
+as designed. **F-20 makes it worse**: the ring cap is per watchdog *process*, so every restart
+rings them again, for ever, about a decision sprout took correctly and cannot un-take.
+
+The honest repair is probably neither — a fourth liveness verdict, or a `Liveness.abandoned` that
+carries whether anything was ever started, so the board can show the gate's sentence without the
+bell. That is a change to `Liveness`, to `ringingVerdicts` and to every branch that switches on
+them, and it belongs with F-20 rather than inside the concurrency repair.
 
 ---
 

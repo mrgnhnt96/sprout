@@ -416,6 +416,80 @@ void main() {
     });
   });
 
+  group('a refused spawn on the board', () {
+    // P4-09. `sprout_ui` is the only place a new `NodeStatus` could break
+    // without the analyzer noticing, because `build_web_compilers` reports a
+    // web-unsafe failure as a warning and exits 0. So this drives the value
+    // through the browser's own decoder and its own renderer.
+    final at = DateTime.utc(2025, 1, 1, 12);
+    const instanceId = 'aaaaaaaaaaaaaaaa';
+
+    LiveTree treeWith(String toStatus) => LiveTree.attaching.apply(
+      DeltaFrame(
+        cursor: Cursor(instanceId: instanceId, position: 2),
+        events: [
+          SproutEvent(
+            seq: 1,
+            nodeId: 'refused-1',
+            ts: at,
+            kind: nodeObservedKind,
+            payload: const {
+              'parent_id': null,
+              'project': '/w/sprout/.worktrees/sprout-refused-1',
+              'status': 'spawning',
+              'current_task': 'a child the depth cap refused',
+            },
+          ),
+          SproutEvent(
+            seq: 2,
+            nodeId: 'refused-1',
+            ts: at,
+            kind: nodeUpdatedKind,
+            payload: {
+              'status': {'from': 'spawning', 'to': toStatus},
+            },
+          ),
+        ],
+      ),
+    );
+
+    test('the browser decodes the new status rather than refusing the '
+        'frame', () {
+      final tree = treeWith('unlaunched');
+      expect(tree.nodes.single.node.status, NodeStatus.unlaunched);
+      expect(tree.strangers, isEmpty);
+    });
+
+    test('and it renders as a node, carrying the status verbatim', () {
+      final tree = treeWith('unlaunched');
+      final node = tree.nodes.single;
+      expect(node.render(at), contains('unlaunched'));
+      expect(App.lines(tree), contains(node.render(at)));
+      // `data-status` is the wire string straight off `NodeStatus.wire`, and
+      // no stylesheet branches on the value, so a new one needs no CSS.
+      expect(node.node.status.wire, 'unlaunched');
+    });
+
+    test('and it holds nothing, so the board stops naming a worktree that '
+        'was torn down', () {
+      // The second symptom P4-09 was found by: `heldResourcesOf` reports
+      // `node.project` for holding nodes only, so a refused node used to
+      // announce a worktree sprout had deleted seconds earlier.
+      expect(
+        heldResourcesOf([for (final n in treeWith('unlaunched').nodes) n.node]),
+        isEmpty,
+      );
+      // The control, in the same shape: a node that really is spawning does
+      // hold its project.
+      expect(
+        heldResourcesOf([for (final n in treeWith('working').nodes) n.node])
+            .single
+            .name,
+        '/w/sprout/.worktrees/sprout-refused-1',
+      );
+    });
+  });
+
   group('a settled tree renders from the snapshot alone', () {
     // The other half of the model. Attaching to a daemon that already has a
     // tree must show it at once — *"so attaching is never a blank screen"*.

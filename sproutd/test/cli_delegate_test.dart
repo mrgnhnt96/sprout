@@ -337,6 +337,15 @@ void main() {
           .listSync()
           .whereType<Directory>()
           .toList();
+      // The positive control for P4-08: the acceptance path already counted
+      // correctly, and it still counts each room exactly once — the accepted
+      // one removed, the rejected one kept without ever being offered.
+      expect(
+        out.toString(),
+        contains('worktrees   removed 1, kept 1'),
+        reason: '$out\n$err',
+      );
+
       expect(worktrees, hasLength(1), reason: 'the rejected room survives');
       expect(
         File(p.join(worktrees.single.path, _leftBehind)).readAsStringSync(),
@@ -418,6 +427,13 @@ void main() {
         expect(event.payload['reason'], 'uncommittedChanges');
       }
       expect(events(db, worktreeRemovedKind), isEmpty);
+      // The other half of the control: a teardown that was offered and refused
+      // counts as kept, once each, and nothing is counted twice.
+      expect(
+        out.toString(),
+        contains('worktrees   removed 0, kept 2'),
+        reason: '$out\n$err',
+      );
 
       final rooms = Directory(p.join(repo, defaultWorktreeDirectory))
           .listSync()
@@ -565,6 +581,71 @@ void main() {
         reason: 'a refused child left an orphan behind',
       );
       expect(out.toString(), contains('refused     2'));
+      // P4-08. The log above says two rooms were removed and the store agrees,
+      // so the summary — the ten seconds of this a human reads — has to say
+      // two as well. It said `removed 0` on trunk, because the refusal path
+      // discarded the teardown's answer.
+      expect(
+        out.toString(),
+        contains('worktrees   removed 2, kept 0'),
+        reason: 'the summary disagrees with the log it just printed:\n$out',
+      );
+    });
+
+    test('a child whose session cannot start reports its teardown too — the '
+        'summary counts the room it removed on the way out', () async {
+      final repo = await _repository(tmp);
+      final db = p.join(tmp.path, 'unlaunchable.db');
+
+      final code = await sprout([
+        'delegate',
+        '--plan',
+        _writePlan(tmp, 'unlaunchable', {
+          'parent_id': 'the-split',
+          'task': 'two things nothing can run',
+          'mode': {
+            'declared': {'mode': 'map', 'reason': 'independent and read-only'},
+          },
+          'children': [
+            _child(
+              'a',
+              files: {
+                'paths': ['lib/one.dart'],
+              },
+            ),
+            _child(
+              'b',
+              files: {
+                'paths': ['lib/two.dart'],
+              },
+            ),
+          ],
+        }),
+        '--project',
+        repo,
+        '--db',
+        db,
+        '--logs',
+        p.join(tmp.path, 'logs'),
+        // No such binary, so `Process.start` throws and the launch fails
+        // *after* the room exists — the second path that tears a room down
+        // without ever having judged a child.
+        '--claude',
+        p.join(tmp.path, 'no-such-claude'),
+      ]);
+
+      expect(code, cli.exitRefused, reason: '$out\n$err');
+      expect(err.toString(), contains('could not start the session'));
+      expect(out.toString(), contains('not started 2'));
+
+      // Both rooms were made and both were removed; the summary says so.
+      expect(events(db, worktreeCreatedKind), hasLength(2));
+      expect(events(db, worktreeRemovedKind), hasLength(2), reason: '$out$err');
+      expect(
+        out.toString(),
+        contains('worktrees   removed 2, kept 0'),
+        reason: 'the summary disagrees with the log it just printed:\n$out',
+      );
     });
   });
 

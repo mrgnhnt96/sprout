@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import '../../policy.dart';
 import 'decomposition.dart';
 import 'estimate.dart';
+import 'mode.dart';
 
 /// One group of children that may run at the same time.
 final class Wave {
@@ -52,8 +53,9 @@ final class WavePlan {
 
   /// The widest any wave in this plan was allowed to be.
   ///
-  /// The smaller of the policy's two concurrency bounds — see [planWaves] for
-  /// what that does and does not promise.
+  /// The smaller of the policy's two concurrency bounds, narrowed again to
+  /// [buildWaveWidth] when the decomposition's mode is build — see [planWaves]
+  /// for what that does and does not promise.
   final int maxWidth;
 
   /// How many children the plan places. Equal to the decomposition's count.
@@ -70,6 +72,11 @@ final class WavePlan {
     final lines = <String>[
       '${decomposition.children.length} children in ${waves.length} '
           'wave${waves.length == 1 ? '' : 's'} (max width $maxWidth)',
+      // The mode, and loudly if nobody chose it. A defaulted mode that read
+      // the same as a declared one in the plan a human is handed would be
+      // `route`'s silent serialization, which showrunner prints rather than
+      // performs.
+      '  mode ${decomposition.mode.label}',
     ];
     for (final wave in waves) {
       lines.add(
@@ -108,8 +115,9 @@ final class WavePlan {
 /// 2. **No two children in a wave have overlapping file sets**, decided by
 ///    [FileEstimate.overlaps], which answers *overlap* whenever it cannot
 ///    decide.
-/// 3. **No wave is wider than the concurrency the gate could permit.** See
-///    below; this is the rule with a caveat.
+/// 3. **No wave is wider than the concurrency the gate could permit**, and a
+///    **build** decomposition is narrowed again to [buildWaveWidth]. See below;
+///    this is the rule with a caveat.
 ///
 /// Placement is first-fit in the parent's own order: each child joins the
 /// earliest wave that has room and no collision, and opens a new one otherwise.
@@ -126,6 +134,14 @@ final class WavePlan {
 /// the refusal. A wave planned wider than the policy allows is a plan that gets
 /// refused halfway through, leaving a half-spawned wave nobody planned for.
 ///
+/// [DelegationMode.build] then narrows it again, to `min(that,
+/// buildWaveWidth)`. That is `docs/01-plan.md` §2.3's *"narrow fan-out"* for
+/// children whose artifacts have to compose, and it is the second of the two
+/// places the mode bites — the first is `Decomposition.briefFor`. Narrowing
+/// only: this can never widen a wave past what the policy would permit, so
+/// INV9's asymmetry is intact. A build decomposition that still produced a
+/// maximum-width wave would be a mode that changed nothing.
+///
 /// It is a **ceiling, not a guarantee.** `maxLiveNodes` is judged against the
 /// whole ledger at admission time, and a decomposition does not know what else
 /// in the tree is live — a sibling subtree can consume the budget between
@@ -140,8 +156,8 @@ WavePlan planWaves(
   Decomposition decomposition, {
   required ContainmentPolicy policy,
 }) {
-  final maxWidth = math.min(policy.maxLiveChildren, policy.maxLiveNodes);
-  if (maxWidth < 1) {
+  final policyWidth = math.min(policy.maxLiveChildren, policy.maxLiveNodes);
+  if (policyWidth < 1) {
     throw ArgumentError.value(
       policy,
       'policy',
@@ -150,6 +166,12 @@ WavePlan planWaves(
           '"nothing to do"',
     );
   }
+  // Exhaustive on purpose: a third mode must fail to compile here rather than
+  // fall through to whichever branch happens to be the default.
+  final maxWidth = switch (decomposition.mode.mode) {
+    DelegationMode.map => policyWidth,
+    DelegationMode.build => math.min(policyWidth, buildWaveWidth),
+  };
 
   final buckets = <_Bucket>[];
   for (final child in decomposition.children) {

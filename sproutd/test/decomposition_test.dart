@@ -37,8 +37,52 @@ PlannedChild child(
   estimatedCostUsd: costUsd,
 );
 
-Decomposition split(List<PlannedChild> children) =>
-    Decomposition(parentId: 'n0', task: 'the whole job', children: children);
+/// The mode every pre-P4-05 group in this file runs under.
+///
+/// Declared rather than defaulted so those groups keep testing what they were
+/// written to test. A defaulted mode is still `build` and lays out identically,
+/// but it also changes what `describe()` prints, and a wave test that silently
+/// doubled as a defaulting test would report the wrong failure.
+final declaredBuild = ModeChoice.declared(
+  DelegationMode.build,
+  'these children write files that have to compose',
+);
+
+/// The other half of §2.3's table, for the tests that need both.
+final declaredMap = ModeChoice.declared(
+  DelegationMode.map,
+  'these children only read, and are checked mechanically',
+);
+
+Decomposition split(
+  List<PlannedChild> children, {
+  ModeChoice? mode,
+  List<String> sharedDecisions = const [],
+}) => Decomposition(
+  parentId: 'n0',
+  task: 'the whole job',
+  children: children,
+  mode: mode ?? declaredBuild,
+  sharedDecisions: sharedDecisions,
+);
+
+/// A policy that permits exactly one live child, for the tests that have to
+/// show `buildWaveWidth` can only ever narrow a wave and never widen one.
+const singleFile = ContainmentPolicy(
+  subtreeBudgetUsd: 1000,
+  runBudgetUsd: 1000,
+  maxLiveChildren: 1,
+  maxLiveNodes: 1,
+);
+
+/// Four children on four disjoint files — the shape that lays out differently
+/// under each mode and identically under everything else.
+List<PlannedChild> get fourDisjoint => [
+  child('a', EstimatedPaths(const ['lib/a.dart'])),
+  child('b', EstimatedPaths(const ['lib/b.dart'])),
+  child('c', EstimatedPaths(const ['lib/c.dart'])),
+  child('d', EstimatedPaths(const ['lib/d.dart'])),
+];
 
 List<List<String>> layout(WavePlan plan) => [
   for (final wave in plan.waves) [for (final c in wave.children) c.id],
@@ -344,6 +388,13 @@ void main() {
     });
   });
 
+  // Every test in this group runs under `declaredMap`, on purpose. P4-05 gave
+  // `build` a second, narrower ceiling of `buildWaveWidth`, so under build the
+  // policy's number would stop being the thing that caps and these tests would
+  // silently start measuring the mode instead. Map is the mode in which the
+  // policy is the *only* bound, which is what each of these is about. That the
+  // narrower build ceiling exists at all, and that it can only narrow, is
+  // asserted in 'the mode has consequences over the same children'.
   group('the width bound', () {
     test('no wave is wider than the policy\'s maxLiveChildren', () {
       const narrow = ContainmentPolicy(
@@ -356,7 +407,7 @@ void main() {
         split([
           for (var i = 0; i < 5; i++)
             child('c$i', EstimatedPaths(['lib/f$i.dart'])),
-        ]),
+        ], mode: declaredMap),
         policy: narrow,
       );
       expect(plan.maxWidth, 2);
@@ -373,7 +424,7 @@ void main() {
           split([
             for (var i = 0; i < 5; i++)
               child('c$i', EstimatedPaths(['lib/f$i.dart'])),
-          ]),
+          ], mode: declaredMap),
           policy: roomy,
         ).waves,
         hasLength(1),
@@ -391,7 +442,7 @@ void main() {
         split([
           for (var i = 0; i < 4; i++)
             child('c$i', EstimatedPaths(['lib/f$i.dart'])),
-        ]),
+        ], mode: declaredMap),
         policy: narrowTree,
       );
       expect(plan.maxWidth, 3);
@@ -407,7 +458,7 @@ void main() {
         split([
           for (var i = 0; i < 10; i++)
             child('c$i', EstimatedPaths(['lib/f$i.dart'])),
-        ]),
+        ], mode: declaredMap),
         policy: defaults,
       );
       expect(plan.maxWidth, defaultMaxLiveChildren);
@@ -426,7 +477,7 @@ void main() {
         () => planWaves(
           split([
             child('c0', EstimatedPaths(const ['lib/a.dart'])),
-          ]),
+          ], mode: declaredMap),
           policy: forbidding,
         ),
         throwsArgumentError,
@@ -506,6 +557,408 @@ void main() {
       expect(
         () => child('a', EstimatedPaths(const ['lib/a.dart']), costUsd: -1),
         throwsArgumentError,
+      );
+    });
+  });
+
+  group('the mode is chosen, and a default says it was one', () {
+    test('a defaulted mode and a declared build mode are the same mode and '
+        'different evidence', () {
+      // §2.3's requirement is that sprout "pick the mode explicitly". A field
+      // that only holds `build` cannot tell a parent that weighed the table
+      // apart from one that never looked, and those are opposite amounts of
+      // evidence about the plan that follows.
+      final defaulted = ModeChoice.defaulted('nothing said which shape');
+      expect(defaulted.mode, DelegationMode.build);
+      expect(defaulted.wasDefaulted, isTrue);
+      expect(defaulted.label, startsWith('NO MODE DECLARED'));
+
+      expect(declaredBuild.mode, DelegationMode.build);
+      expect(declaredBuild.wasDefaulted, isFalse);
+      expect(declaredBuild.label, isNot(contains('NO MODE DECLARED')));
+
+      // Same bit, distinguishable values. This is the assertion that fails if
+      // somebody later collapses ModeChoice back down to the bare enum.
+      expect(defaulted.mode, declaredBuild.mode);
+      expect(defaulted.wasDefaulted, isNot(declaredBuild.wasDefaulted));
+    });
+
+    test('the default is build, and there is no way to default to map', () {
+      // The failure §2.3 names is one-directional: build work fanned out as map
+      // produces artifacts that do not compose, and map work run as build costs
+      // latency. So the default is the expensive branch, and `defaulted` takes
+      // no mode argument at all — a `defaulted(map)` would be `declared` with
+      // the accountability removed.
+      expect(ModeChoice.defaulted('unknown shape').mode, DelegationMode.build);
+      expect(declaredMap.mode, DelegationMode.map);
+      expect(declaredMap.wasDefaulted, isFalse);
+    });
+
+    test('neither kind of choice can be made without a reason', () {
+      expect(() => ModeChoice.defaulted('   '), throwsArgumentError);
+      expect(
+        () => ModeChoice.declared(DelegationMode.map, ''),
+        throwsArgumentError,
+      );
+      // Paired positive, so a constructor mutated to throw always cannot pass
+      // the two above vacuously (INV8).
+      expect(ModeChoice.defaulted('x').reason, 'x');
+      expect(ModeChoice.declared(DelegationMode.map, ' y ').reason, 'y');
+    });
+
+    test('the mode parameter is still `required`, so an unset mode does not '
+        'compile', () {
+      // A test cannot assert a compile error, and the regression that matters
+      // is somebody giving this parameter a default value — at which point an
+      // unset mode silently becomes build with nothing saying so, which is the
+      // exact thing ModeChoice exists to prevent one layer up. So this reads
+      // the source, the way the purity group below reads the whole directory.
+      final source = File('lib/src/decomposition/decomposition.dart')
+          .readAsStringSync();
+      expect(source, contains('required ModeChoice mode,'));
+      expect(source, isNot(contains('ModeChoice mode =')));
+      // The positive control: the pattern that would catch a defaulted mode
+      // does match a defaulted parameter, checked against the one in the same
+      // constructor that legitimately has a default.
+      expect(source, contains('sharedDecisions = const []'));
+      expect(RegExp(r'\w+ \w+ = ').hasMatch(source), isTrue);
+    });
+
+    test('a plan says out loud when nobody chose the mode', () {
+      // showrunner's `route` prints "NO RULE MATCHED — defaulted to
+      // serialized" rather than quietly serializing, because an unmatched leaf
+      // is a missing rule and not a neutral outcome. Same move.
+      final chosen = split(fourDisjoint, mode: declaredBuild);
+      final nobody = split(
+        fourDisjoint,
+        mode: ModeChoice.defaulted('the issue does not say what composes'),
+      );
+      expect(
+        planWaves(chosen, policy: roomy).describe(),
+        isNot(contains('NO MODE DECLARED')),
+      );
+      expect(
+        planWaves(nobody, policy: roomy).describe(),
+        contains('NO MODE DECLARED — defaulted to build'),
+      );
+    });
+  });
+
+  group('the mode has consequences over the same children', () {
+    test('build and map lay the same four children out differently', () {
+      // The whole point of §2.3 being two modes rather than a note: build
+      // narrows the fan-out because the artifacts have to compose (Cognition's
+      // Flappy Bird failure), map fans out as wide as containment permits (RAH
+      // 81→90%). A build decomposition that still produced a maximum-width
+      // wave would be a mode that changed nothing.
+      final asBuild = planWaves(
+        split(fourDisjoint, mode: declaredBuild),
+        policy: roomy,
+      );
+      final asMap = planWaves(
+        split(fourDisjoint, mode: declaredMap),
+        policy: roomy,
+      );
+
+      expect(layout(asMap), [
+        ['a', 'b', 'c', 'd'],
+      ]);
+      expect(layout(asBuild), [
+        ['a', 'b'],
+        ['c', 'd'],
+      ]);
+      expect(asBuild.maxWidth, buildWaveWidth);
+      expect(asMap.maxWidth, greaterThan(asBuild.maxWidth));
+      // Same children, same order, same file estimates — only the mode moved.
+      expect(asBuild.childCount, asMap.childCount);
+    });
+
+    test('build narrows a wave and can never widen one', () {
+      // INV9's asymmetry, applied to the one number this leaf added. Under a
+      // policy that permits a single live child, `buildWaveWidth` of 2 must not
+      // buy a wave of 2 — it is a second ceiling, not a replacement for the
+      // first.
+      final asBuild = planWaves(
+        split(fourDisjoint, mode: declaredBuild),
+        policy: singleFile,
+      );
+      final asMap = planWaves(
+        split(fourDisjoint, mode: declaredMap),
+        policy: singleFile,
+      );
+      expect(asBuild.maxWidth, 1);
+      expect(asMap.maxWidth, 1);
+      expect(layout(asBuild), layout(asMap));
+    });
+
+    test('the parent\'s decisions are pushed down in build and withheld in '
+        'map', () {
+      // §2.3's Context column, as a value rather than an instruction to
+      // whoever writes the briefs. The failure it exists against is children
+      // that each re-decide the same thing — "a Mario background and a bird
+      // that isn't Flappy" — where the decisions were never in dispute, only
+      // never transmitted.
+      final decisions = ['the store schema stays at version 1', 'no new deps'];
+      final built = split(fourDisjoint, sharedDecisions: decisions);
+      final mapped = split(fourDisjoint, mode: declaredMap);
+
+      final builtBrief = built.briefFor(built.children.first);
+      final mappedBrief = mapped.briefFor(mapped.children.first);
+      for (final decision in decisions) {
+        expect(builtBrief, contains(decision));
+        expect(mappedBrief, isNot(contains(decision)));
+      }
+      // Both still carry the child's own task; the mode changes what is added
+      // to it, not what it is. Map adds nothing at all — that is "isolate".
+      expect(builtBrief, contains('do the a part of the work'));
+      expect(mappedBrief, 'do the a part of the work');
+    });
+
+    test('a map brief never carries the parent\'s framing, and a build brief '
+        'always does', () {
+      // Found by mutation, and this test is the repair. The version before it
+      // differed only by sharedDecisions — which a map decomposition cannot
+      // hold — so no constructible input could tell the two branches of
+      // briefFor apart, and a briefFor mutated to push decisions down in map
+      // too passed the entire suite. INV8: "neuter the producer and see what
+      // still passes."
+      //
+      // The parent's own task is what makes the branches differ for EVERY
+      // decomposition, including one with nothing shared, so the switch is
+      // enforcement rather than decoration.
+      final built = split(fourDisjoint);
+      final mapped = split(fourDisjoint, mode: declaredMap);
+      expect(built.sharedDecisions, isEmpty);
+      expect(built.briefFor(built.children.first), contains('the whole job'));
+      expect(
+        mapped.briefFor(mapped.children.first),
+        isNot(contains('the whole job')),
+      );
+      expect(
+        built.briefFor(built.children.first),
+        isNot(mapped.briefFor(mapped.children.first)),
+      );
+    });
+
+    test('a map decomposition cannot hold shared decisions at all', () {
+      // Map isolates context by definition, so decisions that have to reach the
+      // children mean the children are not independent. Refusing here rather
+      // than dropping the field at briefFor: a field silently ignored is the
+      // same class of bug one layer down.
+      expect(
+        () => split(fourDisjoint, mode: declaredMap, sharedDecisions: ['x']),
+        throwsArgumentError,
+      );
+      // The paired positive: the identical call in build is fine.
+      expect(split(fourDisjoint, sharedDecisions: ['x']).sharedDecisions, [
+        'x',
+      ]);
+      expect(
+        () => split(fourDisjoint, sharedDecisions: ['  ']),
+        throwsArgumentError,
+      );
+    });
+
+    test('the two consequences are independent, so neither carries the mode '
+        'alone', () {
+      // The brief and the wave width are separate seams and a mutation to
+      // either one has to be caught by its own assertion. Measured: setting
+      // buildWaveWidth to a number that never narrows fails the layout tests
+      // and leaves the brief tests green, and vice versa.
+      final built = split(fourDisjoint);
+      final mapped = split(fourDisjoint, mode: declaredMap);
+      expect(
+        built.briefFor(built.children.first),
+        isNot(mapped.briefFor(mapped.children.first)),
+      );
+      expect(
+        planWaves(built, policy: roomy).maxWidth,
+        isNot(planWaves(mapped, policy: roomy).maxWidth),
+      );
+    });
+
+    test('a brief cannot be built for a child of a different split', () {
+      final built = split(fourDisjoint);
+      expect(
+        () => built.briefFor(child('stranger', TouchesNothing('read-only'))),
+        throwsArgumentError,
+      );
+    });
+  });
+
+  group('the delegation floor refuses, and counts what it refused', () {
+    test('the same two children are refused when they collide and permitted '
+        'when they do not', () {
+      // The negative control the floor needs, with exactly one variable moved:
+      // two children, same ids, same mode, same policy, same success
+      // conditions. Only the paths differ. A gate that always says yes is
+      // INV8's exact failure, and P1-04's containment gate shipped that shape
+      // for three phases — it ran on every launch and could not refuse any of
+      // them, because the ledger it decided over was always empty.
+      final floor = DelegationFloor(roomy);
+
+      final collide = split([
+        child('a', EstimatedPaths(const ['lib/same.dart'])),
+        child('b', EstimatedPaths(const ['lib/same.dart'])),
+      ]);
+      final refused = floor.decide(collide);
+      expect(refused, isA<DelegationRefusal>());
+      expect(refused.shouldDecompose, isFalse);
+      expect(
+        (refused as DelegationRefusal).reason,
+        FloorReason.noConcurrencyWon,
+      );
+      expect(floor.refusals[FloorReason.noConcurrencyWon], 1);
+      expect(floor.permitted, 0);
+
+      final disjoint = split([
+        child('a', EstimatedPaths(const ['lib/a.dart'])),
+        child('b', EstimatedPaths(const ['lib/b.dart'])),
+      ]);
+      final permit = floor.decide(disjoint);
+      expect(permit, isA<DelegationPermit>());
+      expect(permit.shouldDecompose, isTrue);
+      expect(floor.permitted, 1);
+      // The refusal count did not move on the permit, and the permit did not
+      // move on the refusal. Either half staying still is what would make the
+      // other half unreadable.
+      expect(floor.refusals.total, 1);
+    });
+
+    test('a permit carries the layout it was judged on, and that layout is '
+        'genuinely concurrent', () {
+      final floor = DelegationFloor(roomy);
+      final decision = floor.decide(split(fourDisjoint, mode: declaredMap));
+      final permit = decision as DelegationPermit;
+      expect(permit.plan.childCount, 4);
+      expect(permit.waveCount, 1);
+      expect(permit.widestWave, 4);
+      // The property every permit has and no refusal does: strictly fewer
+      // waves than children, which is the concurrency the coordination bought.
+      expect(permit.waveCount, lessThan(permit.plan.childCount));
+    });
+
+    test('a split into one child is a handoff, not a split', () {
+      final floor = DelegationFloor(roomy);
+      final decision = floor.decide(
+        split([
+          child('a', EstimatedPaths(const ['lib/a.dart'])),
+        ]),
+      );
+      expect((decision as DelegationRefusal).reason, FloorReason.singleChild);
+      expect(decision.explanation, contains('do it yourself'));
+      expect(floor.refusals[FloorReason.singleChild], 1);
+    });
+
+    test('a split nobody could estimate is refused for that, not for the '
+        'layout it happens to produce', () {
+      // Both rules fire on this input — every child unestimable also lays out
+      // fully serially — and the reason has to be the one whose remedy is
+      // right: estimate the file sets, not split on different files.
+      final floor = DelegationFloor(roomy);
+      final decision = floor.decide(
+        split([
+          child('a', UnknownFiles('the issue names no path')),
+          child('b', UnknownFiles('nor does this one')),
+        ]),
+      );
+      expect(
+        (decision as DelegationRefusal).reason,
+        FloorReason.nothingEstimable,
+      );
+      expect(decision.explanation, contains('Estimate the file sets'));
+      expect(floor.refusals[FloorReason.noConcurrencyWon], 0);
+    });
+
+    test('the check order is fixed, so a proposal that trips several always '
+        'reports the same one', () {
+      // ContainmentPolicy.decide fixes its order for the same reason: a refusal
+      // string nobody can assert on is one nobody can test.
+      final floor = DelegationFloor(roomy);
+      final decision = floor.decide(
+        split([child('a', UnknownFiles('no path'))]),
+      );
+      // One child AND unestimable AND fully serial. singleChild is first.
+      expect((decision as DelegationRefusal).reason, FloorReason.singleChild);
+      expect(floor.refusals[FloorReason.nothingEstimable], 0);
+      expect(floor.refusals[FloorReason.noConcurrencyWon], 0);
+    });
+
+    test('every decision is counted somewhere, and a zero reason is still a '
+        'key', () {
+      // The counted-ness itself, rather than any one rule. `permitted + total`
+      // has to equal the number of calls or a decision went uncounted, which
+      // by INV8 is indistinguishable from a floor that never ran.
+      final floor = DelegationFloor(roomy);
+      expect(floor.permitted, 0);
+      expect(floor.refusals.total, 0);
+
+      final proposals = [
+        split([
+          child('a', EstimatedPaths(const ['lib/a.dart'])),
+        ]),
+        split([
+          child('a', UnknownFiles('no path')),
+          child('b', UnknownFiles('no path')),
+        ]),
+        split([
+          child('a', EstimatedPaths(const ['lib/same.dart'])),
+          child('b', EstimatedPaths(const ['lib/same.dart'])),
+        ]),
+        split(fourDisjoint),
+      ];
+      for (final proposal in proposals) {
+        floor.decide(proposal);
+      }
+      expect(floor.permitted + floor.refusals.total, proposals.length);
+      expect(floor.permitted, 1);
+
+      // Every reason present even at zero: "never refused for this" and "this
+      // is not being counted" must not read the same, which is the confusion
+      // RefusalCounts.toWireMap exists to prevent.
+      final wire = FloorCounts.zero().toWireMap();
+      expect(wire.keys.toSet(), FloorReason.values.map((r) => r.wire).toSet());
+      expect(wire.values.every((v) => v == 0), isTrue);
+      expect(floor.refusals.toWireMap()['noConcurrencyWon'], 1);
+    });
+
+    test('the tally cannot be reset, and the counts are read-only', () {
+      final floor = DelegationFloor(roomy);
+      floor.decide(
+        split([
+          child('a', EstimatedPaths(const ['lib/a.dart'])),
+        ]),
+      );
+      expect(
+        () => floor.refusals.byReason[FloorReason.singleChild] = 0,
+        throwsUnsupportedError,
+      );
+      expect(floor.refusals[FloorReason.singleChild], 1);
+    });
+
+    test('narrowing a build plan does not turn a sound split into a refused '
+        'one', () {
+      // buildWaveWidth is 2, so a build decomposition of disjoint children
+      // still wins concurrency and the floor still permits it. If this ever
+      // fails, the knob has been narrowed to 1 and `build` has quietly become
+      // a ban on decomposing code rather than a narrower fan-out.
+      final floor = DelegationFloor(roomy);
+      expect(
+        floor.decide(split(fourDisjoint, mode: declaredBuild)),
+        isA<DelegationPermit>(),
+      );
+      expect(floor.refusals.total, 0);
+    });
+
+    test('the floor decides the same way twice, over the same proposal', () {
+      // Pure, like everything else in this area: no clock, no ledger, no I/O.
+      final proposal = split(fourDisjoint);
+      final first = DelegationFloor(roomy).decide(proposal);
+      final second = DelegationFloor(roomy).decide(proposal);
+      expect(first.runtimeType, second.runtimeType);
+      expect(
+        (first as DelegationPermit).plan.describe(),
+        (second as DelegationPermit).plan.describe(),
       );
     });
   });

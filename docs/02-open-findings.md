@@ -429,6 +429,16 @@ than as a failure. The second is probably right and it is a spawner's decision, 
 Taking it inside this leaf would have meant putting a ledger — and therefore the store — into a
 library whose whole promise is that it has neither.
 
+**P4-05 did not take it either, and the reason is the same one.** `DelegationFloor` decides over a
+`WavePlan`, so it inherits the gap exactly: it is constructed with a `ContainmentPolicy` and never
+sees a `SpendLedger`, so a proposal it permits can still have its last children refused by
+`ContainmentGate.admit` for `concurrency`. P4-05 was scoped to values and pure functions, and the
+remedy this entry already argues for — treating a `concurrency` refusal as a signal to hold the
+remaining children back into the next wave — is a spawner's, so it needs the leaf that wires a
+decomposition to `SessionRunner.launch`. That leaf still does not exist. Note for whoever writes
+it: the floor's own doc says a `DelegationRefusal` does not stop anything, so nothing in the
+decomposition area is where this gets handled.
+
 ---
 
 ### F-27 — `package:sproutd/decomposition.dart` has no producer and no consumer outside its own test
@@ -453,6 +463,62 @@ indistinguishable from one with a producer as long as its own tests are the only
 next reader takes a well-tested library as evidence something uses it. **If Phase 4 ends without
 P4-05, this entry is the thing that says the machinery is unreached** — delete it in the commit
 that gives `Decomposition` its first real caller, not before.
+
+**Re-measured by P4-05, and it did NOT clear this.** P4-05's brief anticipated that it might —
+*"if your work gives it one, say so and retire the finding"* — and it does not. P4-05 added
+`ModeChoice`, `DelegationFloor` and `Decomposition.briefFor` to the same library; the grep above,
+re-run verbatim after that landed and widened to `\|DelegationFloor\|ModeChoice`, still matches
+nothing outside `lib/src/decomposition/`, `lib/decomposition.dart` and
+`test/decomposition_test.dart`. `bin/sprout.dart`'s import list is unchanged and does not include
+`package:sproutd/decomposition.dart`.
+
+The reason is that P4-05 was scoped to values and pure functions — *"nothing spawns"* — so it
+produces the *decision about* a `Decomposition`, not a `Decomposition`. The first real producer is
+whatever wires a parent session's proposal to `SessionRunner.launch`, and no leaf in the campaign
+graph has done that yet. So the entry is now **larger** than P4-04 left it, not smaller: three
+value types in this library are unreached rather than one, and P4-05 was the leaf the original
+entry named as the thing that would clear it.
+
+---
+
+### F-28 — The delegation floor cannot decide whether a task is too small to split, and nothing sprout observes would let it
+
+**Status: OPEN, and it is a limit rather than a defect.** Found by P4-05 while building
+`DelegationFloor`, which is the first thing that has to answer §3's question.
+
+`docs/01-plan.md` §3 says sprout *"decomposes only when the root task is plausibly beyond one
+session"* and supports it with two numbers from Kim et al.: negative returns from added agents above
+~**45%** single-agent baseline accuracy, and coordination turns scaling as a power law with exponent
+**1.724**.
+
+**Neither number is available at decision time, and the first one is not a quantity sprout can ever
+hold.** 45% is a baseline accuracy *on a benchmark* — producing it needs a labelled task set and a
+measured single-agent run over it, and sprout has neither when a parent hands it a proposal. 1.724
+is an exponent on a cost sprout pays but does not observe in advance. What sprout actually holds at
+that moment is the proposal: a child count, a `FileEstimate` per child, an optional dollar estimate,
+and a set of `SuccessCondition`s. None of those measures task difficulty, and the nearest proxies
+are actively misleading — a one-line change across forty files is small, a three-file rewrite is
+not, and the estimated path count ranks them backwards.
+
+So `DelegationFloor` deliberately ships **no task-size rule**. Its three reasons
+(`singleChild`, `nothingEstimable`, `noConcurrencyWon`) are all properties of the proposal's own
+wave layout, which is genuinely observed. They catch splits that are *structurally* pointless — a
+split that wins no concurrency at all, so it pays §3's coordination cost for no return. They do not
+catch a split that is merely **not worth it**: two disjoint children over a ten-minute job is
+permitted here and probably should not have been proposed. That is the larger half of §3 and it is
+the half that is open.
+
+**Why it was not repaired here.** The only fix available inside this leaf would have been a
+threshold over a proxy — "fewer than K estimated files ⇒ do not decompose" — and shipping one would
+have dressed a guess as evidence. That is INV7's failure (*a sum is not a distribution*) and
+INV10's (*a control-plane fact is observed or it is not a fact*), and it is worse than the gap: a
+number that looks derived from §3 is one the next reader will not re-check, whereas an absent rule
+announces itself. A real fix needs an input sprout does not have yet, and the two candidates are
+both measurements rather than judgements — outcome data from sprout's own completed runs (it
+*"observes every trajectory across every project on the machine"*, §14.5), or a per-node cost the
+control plane already reports (§14.6, INV13), used after the fact to learn which splits paid for
+themselves. Both are post-hoc, so the floor could only ever be calibrated by a run that already
+happened, never derived from the plan in front of it.
 
 ---
 

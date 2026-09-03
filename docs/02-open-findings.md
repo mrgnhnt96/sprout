@@ -429,6 +429,28 @@ than as a failure. The second is probably right and it is a spawner's decision, 
 Taking it inside this leaf would have meant putting a ledger — and therefore the store — into a
 library whose whole promise is that it has neither.
 
+**P4-07 reached it, took the remedy this entry argues for in part, and the entry narrows rather than
+closes.** `sprout delegate` is the leaf that wires a decomposition to `SessionRunner.launch`, and it
+does two of the three things named above. It re-reads the ledger **before every child launch**
+rather than once per wave, so the children already launched in the same wave are counted by the gate
+that admits the next one — a stale ledger was the self-inflicted half of this gap. And a child the
+gate refuses is reported, is not treated as a crash, does not stop the run, and has its worktree
+removed at once, so a refusal cannot leak a directory per child.
+
+**What it does NOT do is hold the refused child back into the next wave.** That is the remedy this
+entry calls "probably right", and it was not taken: a child that has been refused is reported and
+dropped, and the exit code says so. Retrying it in a later wave means re-creating a worktree under a
+new node id and re-running the same admission, which is a retry policy — and there is no observed
+failure that says how many times, or whether a `budget` refusal (which will still refuse) should be
+retried at all like a `concurrency` refusal (which may not). INV4: no gate without a logged, observed
+failure.
+
+**And the `concurrency` reason itself is still unexercised.** `.showrunner/p4-07-mutations.md`
+records why: a wave is capped at `min(maxLiveChildren, maxLiveNodes)` = 4 against a tree-wide bound
+of 12, so no plan alone can exceed it. Reaching that reason needs a store already holding live
+nodes, which is F-24's residue and has no verb. The handling is the same branch either way — both
+are `SpawnRefusal` — but only `budget` has actually run through it.
+
 **P4-05 did not take it either, and the reason is the same one.** `DelegationFloor` decides over a
 `WavePlan`, so it inherits the gap exactly: it is constructed with a `ContainmentPolicy` and never
 sees a `SpendLedger`, so a proposal it permits can still have its last children refused by
@@ -438,74 +460,6 @@ remaining children back into the next wave — is a spawner's, so it needs the l
 decomposition to `SessionRunner.launch`. That leaf still does not exist. Note for whoever writes
 it: the floor's own doc says a `DelegationRefusal` does not stop anything, so nothing in the
 decomposition area is where this gets handled.
-
----
-
-### F-27 — `package:sproutd/decomposition.dart` has no producer and no consumer outside its own test
-
-**Status: OPEN and EXPECTED.** Recorded by P4-04 against itself, because a true premise attached to
-code nothing reaches is void and a green suite cannot tell the difference.
-
-Measured after the leaf landed: `grep -rn "decomposition.dart\|planWaves\|PlannedChild\|Decomposition"
-sproutd/bin sproutd/lib sproutd/routes sproutd/test sprout_protocol/lib sprout_ui/lib` matches the
-library's own source and `sproutd/test/decomposition_test.dart`, and nothing else at all.
-`bin/sprout.dart` never imports it, no route serves it, and no `Decomposition` is ever constructed
-outside that one test file. Everything in it passes and none of it runs in the product.
-
-That is the build order rather than a defect: `docs/01-plan.md` §11 puts *"map/build modes, waves
-over estimated file sets"* in Phase 4, and the campaign's own graph has the two leaves that consume
-this one — **p4-05-delegation-floor-and-mode** (which decides *whether* to decompose and produces
-the `Decomposition`) and **p4-06-parent-acceptance-check** (which evaluates the
-`SuccessCondition`s this leaf made mandatory). Neither has run.
-
-It is written down anyway because of what it costs if they do not. A value type with no producer is
-indistinguishable from one with a producer as long as its own tests are the only caller, and the
-next reader takes a well-tested library as evidence something uses it. **If Phase 4 ends without
-P4-05, this entry is the thing that says the machinery is unreached** — delete it in the commit
-that gives `Decomposition` its first real caller, not before.
-
-**Re-measured by P4-05, and it did NOT clear this.** P4-05's brief anticipated that it might —
-*"if your work gives it one, say so and retire the finding"* — and it does not. P4-05 added
-`ModeChoice`, `DelegationFloor` and `Decomposition.briefFor` to the same library; the grep above,
-re-run verbatim after that landed and widened to `\|DelegationFloor\|ModeChoice`, still matches
-nothing outside `lib/src/decomposition/`, `lib/decomposition.dart` and
-`test/decomposition_test.dart`. `bin/sprout.dart`'s import list is unchanged and does not include
-`package:sproutd/decomposition.dart`.
-
-The reason is that P4-05 was scoped to values and pure functions — *"nothing spawns"* — so it
-produces the *decision about* a `Decomposition`, not a `Decomposition`. The first real producer is
-whatever wires a parent session's proposal to `SessionRunner.launch`, and no leaf in the campaign
-graph has done that yet. So the entry is now **larger** than P4-04 left it, not smaller: three
-value types in this library are unreached rather than one, and P4-05 was the leaf the original
-entry named as the thing that would clear it.
-
-**Re-measured by P4-06, and it NARROWS for the first time — one type of the several is now
-reached.** The same grep, re-run verbatim after P4-06 landed, now matches `SuccessCondition` in
-three places outside `lib/src/decomposition/`: `bin/sprout.dart` (the `--accept-if` option, which
-constructs one per declared command), `lib/src/acceptance/` (which evaluates them), and
-`test/acceptance_test.dart`. So `SuccessCondition` has a real producer in the product entrypoint and
-a real consumer that runs it — it is no longer an island.
-
-**Everything else in the library is still unreached, and the grep still says so.** `Decomposition`,
-`PlannedChild`, `planWaves`, `WavePlan`, `DelegationFloor`, `DelegationPermit`, `DelegationRefusal`,
-`ModeChoice` and `FileEstimate` match nothing outside `lib/src/decomposition/`,
-`lib/decomposition.dart` and `test/decomposition_test.dart` except in **prose** — doc comments in
-`lib/src/acceptance/` and `test/acceptance_test.dart` that explain why an arm exists by naming
-`PlannedChild`'s constructor. A doc comment is not a caller.
-
-The reason P4-06 could reach one and not the rest is worth writing down, because it tells the next
-leaf what is actually missing. P4-06 evaluates a condition **against one finished child**, and a
-`SuccessCondition` can be handed to it by an operator on the command line, so it needed no planner.
-Everything else in the library describes a *split* — several children, laid out into waves, spawned
-under a parent — and nothing can produce one of those without wiring a parent's proposal to
-`SessionRunner.launch`. **That leaf still does not exist**, and it is still the one that clears the
-rest of this entry.
-
-One narrower gap inside the part that is now reached: `SuccessCondition.workingDirectory` has **no
-producer**. `--accept-if` always leaves it null, so the only thing that ever sets it is
-`test/acceptance_test.dart`. The field is read — `ProcessConditions` resolves it, and
-`.showrunner/p4-06-mutations.md` mutant 9 confirms a test detects it being ignored — but nothing in
-the product supplies one.
 
 ---
 
@@ -593,10 +547,104 @@ one field on `EndedSession`, in the leaf that owns `runner`.
 
 ---
 
+### F-30 — sprout signals the process it started, not its process group, so a child that forked outlives the kill
+
+**Status: OPEN.** Found by P4-07 while building the per-child deadline, and measured against a shell
+stand-in rather than inferred.
+
+`LiveSession.kill` calls `Process.kill`, which signals one pid. `sprout delegate` escalates —
+SIGTERM at the deadline, SIGKILL after a short grace — and `RunCommand._watch` forwards SIGINT the
+same way. All of it reaches the process sprout launched and **nothing beneath it**.
+
+That matters because of how `LiveSession._pump` decides a session has ended: it drains
+`process.stdout` to close, and a pipe closes only when *every* holder of the write end has let go. A
+child that forked a grandchild — a shell that runs `sleep` in the foreground is the smallest example
+— leaves that grandchild holding the inherited stdout after the shell itself is dead. So the pump
+keeps waiting, `EndedSession` never completes, and the wave the deadline exists to release is held
+anyway, by a process sprout signalled nothing to.
+
+Observed while writing `test/cli_delegate_test.dart`: the timeout test's stand-in was first written
+as a shell script running `sleep 30`, and the SIGKILL freed nothing. It was changed to `exec sleep`
+— so the sleeping process *is* the launched process — and the deadline then works exactly as
+designed. That is the test staging around the bug, and it is recorded here rather than hidden
+because a real `claude` that spawns a tool subprocess is the same shape.
+
+**Why it was not repaired here.** Killing a process group needs the child to be started in one, and
+`Process.start` in `dart:io` exposes no `setsid`. The fix is in `ClaudeLauncher` — start through a
+small helper that calls `setsid`, or add a platform call — which is `runner`'s file and not this
+leaf's. Anything taking it should note the second half: sprout would then be able to kill a group it
+did not fully create, so the same "do not destroy work" caution that shaped `Worktrees.remove`
+applies.
+
+---
+
+### F-31 — A worktree kept because its child was NOT ACCEPTED leaves no row on the feed
+
+**Status: OPEN.** Found by P4-07 in its own real run, by reading the capture against the report:
+`.showrunner/p4-07-real-run.md` shows `worktrees removed 0, kept 2` on stdout and exactly **one**
+`worktree.kept` event in the store.
+
+Both numbers are correct and they count different things. `worktree.kept` is written by the CLI when
+`Worktrees.remove` **refused** — it carries that library's own `reason`, `explanation` and
+`evidence`. A child whose acceptance failed is never offered to `Worktrees.remove` at all, so there
+is no `WorktreeKept` value to write and no row is appended. The operator is told on stderr; the feed
+is not.
+
+The consequence is for anything reading the feed rather than the terminal. A `worktree.created` with
+no `worktree.removed` and no `worktree.kept` has two very different causes — the child was rejected
+and its room was deliberately preserved, or the process that owned the teardown died before running
+it, which is F-24 — and the feed cannot tell them apart. That is the INV8 shape: a decision whose
+record is silence.
+
+`sprout run` has the same gap for the same reason and it is less visible there, because one
+invocation judges one child.
+
+**Why it was not repaired here.** The obvious fix is a new `kind`, and wire vocabulary is
+append-only by schema trigger with no rewrite path, so declaring one is deliberate rather than
+convenient. There is a real argument against it: the `acceptance.rejected` row is already on that
+node's feed and already says why the room was kept, so a consumer could join the two rather than
+read a second row that restates one. The argument for it is that joining is a derivation, and F-01
+is what two derivations of one rule cost. Whoever settles it owns `sprout_protocol`'s kinds file, so
+it is one decision covering both verbs rather than one this leaf could take for `delegate` alone.
+
+---
+
 ## Notes that are not findings
 
 These are true, cost nothing to know, and would cost real time to rediscover.
 
+- **F-27 was closed by P4-07 and its entry deleted from this file, which is how a finding leaves.**
+  It said `package:sproutd/decomposition.dart` had no producer and no consumer outside its own test,
+  and instructed the leaf that gave `Decomposition` a real caller to delete it. `sprout delegate
+  --plan <file.json>` is that caller. The grep the entry was opened with, re-run verbatim after the
+  verb landed:
+
+  ```
+  $ grep -rn "decomposition.dart\|DelegationFloor\|planWaves" sproutd/bin sproutd/lib \
+      | grep -v "lib/src/decomposition\|lib/decomposition.dart"
+  sproutd/bin/sprout.dart:69:import 'package:sproutd/decomposition.dart';
+  sproutd/bin/sprout.dart:1148:    final floor = DelegationFloor(gate.policy);
+  sproutd/lib/src/acceptance/condition_runner.dart:7:import 'package:sproutd/decomposition.dart';
+  sproutd/lib/src/acceptance/check.dart:4:import 'package:sproutd/decomposition.dart';
+  ```
+
+  (Doc-comment matches in `bin/sprout.dart` are elided; the four lines above are the code ones. A
+  doc comment is not a caller, which is the rule the entry itself applied to P4-06.)
+
+  `bin/sprout.dart` now reaches `Decomposition`, `PlannedChild`, `FileEstimate`'s three arms,
+  `ModeChoice` (through `parsePlan`), `DelegationFloor`, `DelegationPermit`, `DelegationRefusal` and
+  `WavePlan` (through `permit.plan`) on a path one command reaches. `.showrunner/p4-07-real-run.md`
+  is a capture of it running for real against a git repository, with the resulting depth-2 tree read
+  back by `sprout snapshot`. (P4-07)
+- **Two narrow things in that library are reachable but still not exercised end to end.**
+  `planWaves` is called only by `DelegationFloor._judge`, and the verb reads the layout back off
+  `DelegationPermit.plan` rather than planning a second time — deliberately, so the layout that runs
+  is the layout that was admitted, but it means the function has a producer at one remove.
+  `Wave.isolationReason` is printed by the verb and no plan in the suite or in the real run carried
+  an unestimable child, so that branch is still covered by `decomposition_test.dart` alone. And
+  `SuccessCondition.workingDirectory`, which had no producer at all before, is now readable from a
+  plan file — but nothing in `cli_delegate_test.dart` sets one, so only the unit path runs it.
+  (P4-07)
 - **`sprout run --accept-if` splits on whitespace and puts no shell in the gap.** A
   `SuccessCondition` is an argv and a directory precisely so that what is declared and what executes
   are the same text — an interpreter between them is F-08 in a different costume. So the flag's

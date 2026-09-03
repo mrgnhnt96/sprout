@@ -44,6 +44,8 @@ export 'src/values/kinds.dart'
         acceptanceKindPrefix,
         acceptanceRejectedKind,
         acceptanceUndecidableKind,
+        delegateKindPrefix,
+        delegatePlannedKind,
         hookKindForEventName,
         hookKindPrefix,
         hookKindsByEventName,

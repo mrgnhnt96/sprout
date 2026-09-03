@@ -155,7 +155,44 @@ const int exitWorktreeRefused = 8;
 /// machine, and one code for both would hide which a run hit.
 const int exitWorktreeFailed = 9;
 
+/// `sprout delegate`: the **delegation floor refused**, so nothing was spawned.
+///
+/// Its own code, and it is not an error code. `docs/01-plan.md` §3 calls not
+/// decomposing *"the cheapest performance win in the whole design"* and says it
+/// *"consists of not building a tree"* — so this is the outcome the verb exists
+/// to be able to reach cheaply, and a script that could not tell it from a
+/// crash would have no way to act on the one branch §3 recommends. Nothing was
+/// created: no node row, no worktree, no process. The remedy is in the
+/// refusal's own explanation, which names which of `DelegationFloor`'s three
+/// rules fired and what to do instead.
+const int exitDelegationRefused = 10;
+
+/// `sprout delegate`: at least one child was **rejected** by its acceptance
+/// check.
+///
+/// sprout looked and the answer was no: a declared success condition ran and
+/// exited non-zero, the child never produced a result, or its subtree had not
+/// drained. Distinct from [exitSessionFailed] because the *session* may have
+/// exited 0 — §2.4's whole argument is that the thing producing the artifact is
+/// not the thing that judges it.
+const int exitChildRejected = 11;
+
+/// `sprout delegate`: at least one child's acceptance was **undecidable**.
+///
+/// A declared condition could not be run at all — no such executable, no such
+/// directory — so there is no verdict about that child in either direction.
+/// It outranks [exitChildRejected] in the exit code this verb returns, and the
+/// order is the point: *"a pass that is silence proves nothing on its own"*
+/// (INV8), and a run where a gate never executed is one whose result is unknown
+/// rather than one whose result is bad. The remedy is different too — fix the
+/// condition, not the code.
+const int exitChildUndecidable = 12;
+
 /// Bad arguments. `EX_USAGE` from sysexits.h.
+///
+/// Also what `sprout delegate --plan` returns for a file it cannot read or
+/// cannot turn into a `Decomposition`: the arguments named a plan and the plan
+/// is not one, which is a fact about the value of an argument.
 const int exitUsage = 64;
 
 /// The environment variable naming the watchdog's NDJSON journal.
@@ -254,6 +291,9 @@ Future<int> sprout(
         )
         ..addCommand(
           RunCommand(out: stdoutSink, err: stderrSink, environment: env),
+        )
+        ..addCommand(
+          DelegateCommand(out: stdoutSink, err: stderrSink, environment: env),
         )
         ..addCommand(
           SnapshotCommand(out: stdoutSink, err: stderrSink, environment: env),
@@ -834,19 +874,8 @@ final class RunCommand extends Command<int> {
     }
   }
 
-  void _printFrame(StreamFrame frame) {
-    switch (frame) {
-      case SystemInitFrame(:final model, :final sessionId):
-        out.writeln('session $sessionId  model $model');
-      case AssistantFrame(:final message):
-        final text = message.text.trim();
-        if (text.isNotEmpty) out.writeln(text);
-      case MalformedFrame():
-        err.writeln('sprout: malformed line in stream, kept in the raw log');
-      default:
-        break;
-    }
-  }
+  void _printFrame(StreamFrame frame) =>
+      printSessionFrame(frame, out: out, err: err);
 
   int _report(EndedSession ended) {
     final cost = ended.totalCostUsd;
@@ -864,6 +893,825 @@ final class RunCommand extends Command<int> {
       return exitSessionFailed;
     }
     return ended.exitCode == 0 ? exitOk : exitSessionFailed;
+  }
+}
+
+/// `sprout delegate --plan <file.json>`.
+///
+/// The verb that makes a `Decomposition` reach a process. Everything
+/// `package:sproutd/decomposition.dart` declares is on this path and nowhere
+/// else in the product: the plan is read into a [Decomposition], the
+/// [DelegationFloor] decides whether the split is worth building at all,
+/// [planWaves] lays the children out, each child gets a git worktree and a
+/// session under one parent node, and each return is judged by an
+/// [AcceptanceCheck] whose answer gates the teardown.
+///
+/// **The floor is consulted first, and its refusal is the cheapest outcome
+/// here rather than an error path.** `docs/01-plan.md` §3: *"just do it
+/// yourself" is a first-class branch and the default for small tasks … this is
+/// the cheapest performance win in the whole design and it consists of not
+/// building a tree.* A refusal therefore happens before the repository is
+/// resolved, before a node row exists and before `git worktree add` runs — it
+/// costs one JSON parse — prints which of the floor's three rules fired with
+/// the remedy that rule names, and returns [exitDelegationRefused]. Nothing is
+/// created, so there is nothing to clean up.
+///
+/// **Waves run in order; the children inside one wave run at the same time.**
+/// That is the whole content of a wave: a layout whose output was executed
+/// serially would prove nothing about `planWaves`, and the plan's guarantee —
+/// no two children in a wave have overlapping estimated file sets, and an
+/// unestimable child is alone — is only worth anything if the concurrency it
+/// permits actually happens. The launches inside a wave are still *sequenced*,
+/// because each one is admitted against a ledger read back out of the store
+/// and a stale ledger is a gate that cannot say no (INV8); what overlaps is the
+/// sessions, which is where all the time is.
+///
+/// **A child refused by the containment gate leaves no orphan.** That is F-26:
+/// a wave is planned against a `ContainmentPolicy` and admitted against a
+/// `SpendLedger`, so a wave at the bound can still have its last child refused
+/// by `ContainmentGate.admit`. This verb is the first thing that can reach that
+/// case. It is reported, it is not a crash, and the child's worktree is torn
+/// down immediately — a refused spawn started no process, so the room is clean
+/// and the teardown really removes it, exactly as `sprout run` does for the
+/// same reason.
+///
+/// **Every child is given `Decomposition.briefFor(child)`, never its raw
+/// task.** That is the first of the two places §2.3's mode bites — map hands
+/// over the child's own task and nothing else, build carries the parent's task
+/// and its shared decisions down — and passing `child.task` here would make the
+/// mode a field nobody reads, which is the surviving mutant
+/// `.showrunner/p4-05-mutations.md` records.
+///
+/// **The delegation itself gets a node row, and it is not a session.** The
+/// children need a parent that is in the ledger — `SessionRunner.launch` throws
+/// when `parentId` names a node the ledger it was handed does not hold — and
+/// the row is also what makes the tree a tree in `sprout snapshot` and on the
+/// board. It is written `working` while the waves run and moved to
+/// `checkpointed` before this verb returns, so it does not become the F-24
+/// shape it would otherwise be: a row stuck live for ever, holding a
+/// concurrency slot nothing releases. It is deliberately **not** put through
+/// `ContainmentGate.admit`: no process is spawned for it, and counting a
+/// refusal for a spawn that never existed would corrupt the one tally INV14
+/// exists to keep honest. The bounds still bite on this tree, one level down —
+/// every child is admitted with this node as its parent, so the depth cap, the
+/// subtree budget and the concurrency bounds all apply to them.
+///
+/// **What is deliberately not here.** No model produces the plan: the
+/// decomposition is data the caller supplies, and putting an LLM in the middle
+/// of it would put a guess inside the thing being proved. No reaper, so a
+/// worktree kept by a child that died with `sprout delegate` still running is
+/// cleaned up, and one left by a `sprout delegate` that was itself killed is
+/// not — F-24. And no new bound: the width of a wave is `planWaves`'s, taken
+/// from the policy and narrowed by the mode, and nothing here widens either
+/// (INV9).
+final class DelegateCommand extends Command<int> {
+  /// Creates the verb.
+  DelegateCommand({
+    required this.out,
+    required this.err,
+    required this.environment,
+  }) {
+    argParser
+      ..addOption(
+        'plan',
+        help:
+            'A JSON file describing the decomposition: the task, the children, '
+            'each child\'s estimated file set and its machine-checkable '
+            'success conditions, and which of docs/01-plan.md §2.3\'s two '
+            'modes this split is. See package:sproutd/decomposition.dart\'s '
+            'parsePlan for the shape.',
+      )
+      ..addOption(
+        'project',
+        abbr: 'C',
+        help:
+            'The project directory the split is against. Must be in a git '
+            'repository: every child runs in a worktree of it.',
+        defaultsTo: Directory.current.path,
+      )
+      ..addOption('db', help: databaseOptionHelp)
+      ..addOption(
+        'logs',
+        help:
+            'Where raw session logs go, one <node>.ndjson and <node>.stderr '
+            'each. Defaults to a sessions/ directory beside the database.',
+      )
+      ..addOption(
+        'parent',
+        help:
+            'The node id to hang the delegation under. Omit for a root. The '
+            'node must already be in the store.',
+      )
+      ..addOption(
+        'budget-usd',
+        help:
+            'The dollar ceiling, per subtree and for the run, checked before '
+            'every child launch and passed to each claude as '
+            '--max-budget-usd.',
+        defaultsTo: defaultBudgetUsd.toString(),
+      )
+      ..addOption(
+        'claude',
+        help: 'The claude executable to launch.',
+        defaultsTo: 'claude',
+      )
+      ..addOption(
+        'base',
+        help: 'The ref each child\'s worktree branch is cut from.',
+        defaultsTo: 'HEAD',
+      )
+      ..addOption(
+        'child-timeout-ms',
+        help:
+            'How long one child may run before sprout stops it. A knob with '
+            'nothing behind it, not a finding: it is here because a child that '
+            'never returns would otherwise hold its wave, and every wave after '
+            'it, for ever.',
+        defaultsTo: defaultChildTimeout.inMilliseconds.toString(),
+      );
+  }
+
+  /// Where progress goes.
+  final StringSink out;
+
+  /// Where errors go.
+  final StringSink err;
+
+  /// The environment, for `SPROUT_DB`.
+  final Map<String, String> environment;
+
+  @override
+  String get name => 'delegate';
+
+  @override
+  String get description =>
+      'Run a decomposition: consult the delegation floor, lay the children out '
+      'into waves, spawn each one in its own worktree, and judge what comes '
+      'back.';
+
+  @override
+  String get invocation => 'sprout delegate --plan <file.json> [options]';
+
+  @override
+  Future<int> run() async {
+    final results = argResults!;
+    final planPath = results['plan'] as String?;
+    if (planPath == null || planPath.trim().isEmpty) {
+      usageException('A plan is required: sprout delegate --plan <file.json>');
+    }
+    final budget = double.tryParse(results['budget-usd'] as String);
+    if (budget == null || budget <= 0) {
+      usageException('--budget-usd must be a positive number of dollars');
+    }
+    final timeoutMs = int.tryParse(results['child-timeout-ms'] as String);
+    if (timeoutMs == null || timeoutMs <= 0) {
+      usageException('--child-timeout-ms must be a positive whole number');
+    }
+
+    final project = p.absolute(results['project'] as String);
+    if (!Directory(project).existsSync()) {
+      usageException('--project does not exist: $project');
+    }
+
+    // Read and parse before anything is opened or created. A plan that is not
+    // a plan costs nothing but this.
+    final String source;
+    try {
+      source = File(p.absolute(planPath)).readAsStringSync();
+    } on FileSystemException catch (error) {
+      err.writeln('sprout: --plan could not be read: ${error.message}');
+      return exitUsage;
+    }
+    final Decomposition decomposition;
+    try {
+      decomposition = parsePlan(source);
+    } on PlanFormatException catch (error) {
+      // What the *document* is. `where` names the exact value.
+      err.writeln('sprout: $error');
+      return exitUsage;
+    } on ArgumentError catch (error) {
+      // What the *plan says*: a child with no success condition, an empty path
+      // set, a map decomposition carrying shared decisions. These come out of
+      // the value constructors with the argument the rule exists for, and they
+      // are printed rather than re-worded — the constructor's sentence is the
+      // one that names the rule.
+      err.writeln('sprout: the plan is not a decomposition: $error');
+      return exitUsage;
+    }
+
+    final dbPath = resolveDatabasePath(
+      option: results['db'] as String?,
+      environment: environment,
+    );
+    final logDirectory = p.absolute(
+      results['logs'] as String? ?? p.join(p.dirname(dbPath), 'sessions'),
+    );
+
+    final store = SproutStore.open(path: dbPath);
+    try {
+      return await _run(
+        store: store,
+        decomposition: decomposition,
+        project: project,
+        parentId: results['parent'] as String?,
+        budgetUsd: budget,
+        logDirectory: logDirectory,
+        executable: results['claude'] as String,
+        base: results['base'] as String,
+        childTimeout: Duration(milliseconds: timeoutMs),
+      );
+    } finally {
+      store.close();
+    }
+  }
+
+  Future<int> _run({
+    required SproutStore store,
+    required Decomposition decomposition,
+    required String project,
+    required String? parentId,
+    required double budgetUsd,
+    required String logDirectory,
+    required String executable,
+    required String base,
+    required Duration childTimeout,
+  }) async {
+    final gate = ContainmentGate(
+      ContainmentPolicy(subtreeBudgetUsd: budgetUsd, runBudgetUsd: budgetUsd),
+    );
+
+    // The floor decides FIRST, over the same policy the waves will be planned
+    // against — `DelegationFloor`'s own doc requires that, because it judges a
+    // layout and a layout does not exist without the width bound the policy
+    // sets. A floor that decided over one policy while the run used another
+    // judged a plan nobody executed.
+    final floor = DelegationFloor(gate.policy);
+    final decision = floor.decide(decomposition);
+    final DelegationPermit permit;
+    switch (decision) {
+      case DelegationRefusal(:final reason, :final explanation):
+        // Not an error path. Nothing was created, so nothing is torn down, and
+        // the tally is printed beside the refusal because a decision not to
+        // decompose makes no tool call at all — the platform counts only its
+        // own refusals, so if sprout does not say this out loud the cheapest
+        // win in the design leaves no trace of having happened (INV14).
+        out
+          ..writeln('delegate ${decomposition.parentId}: NOT DECOMPOSED')
+          ..writeln('  ${reason.wire}: $explanation')
+          ..writeln('  floor refusals ${floor.refusals.toWireMap()}')
+          ..writeln('  nothing was spawned');
+        return exitDelegationRefused;
+      case DelegationPermit():
+        permit = decision;
+    }
+    final plan = permit.plan;
+
+    final repositoryRoot = await Worktrees.repositoryRootOf(project);
+    if (repositoryRoot == null) {
+      err.writeln(
+        'sprout: delegate gives every child its own git worktree, and '
+        '$project is not in a git repository',
+      );
+      return exitUsage;
+    }
+    final worktrees = Worktrees(repositoryRoot: repositoryRoot);
+
+    final observed = readLedger(StoreSnapshotSource(store));
+    if (observed.journalUnreadable case final reason?) {
+      err
+        ..writeln(
+          'sprout: the event feed could not be read, so no spawn beneath '
+          'this store can be bounded on spend',
+        )
+        ..writeln(reason);
+      return exitStoreUnreadable;
+    }
+    if (parentId != null && !observed.ledger.contains(parentId)) {
+      err.writeln(
+        'sprout: --parent $parentId is not a node in ${store.databasePath}, '
+        'so its depth is unknown and no spawn beneath it can be bounded',
+      );
+      return exitUsage;
+    }
+    out
+      ..writeln('tree ${observed.spendLabel}')
+      ..writeln('delegate ${decomposition.parentId}')
+      ..writeln(plan.describe());
+
+    // The delegation's own node, written before any child so that the ledger
+    // the first admission is taken over contains it. See [DelegateCommand] for
+    // why this row exists, why it is not put through the gate, and why it must
+    // not be left live.
+    final delegationId = newNodeId();
+    store.putNode(
+      SproutNode(
+        id: delegationId,
+        parentId: parentId,
+        project: project,
+        status: NodeStatus.working,
+        currentTask: decomposition.task,
+        since: DateTime.now(),
+      ),
+    );
+    store.append(
+      nodeId: delegationId,
+      kind: delegatePlannedKind,
+      payload: {
+        'parent_id': decomposition.parentId,
+        'task': decomposition.task,
+        'mode': decomposition.mode.mode.wire,
+        'mode_defaulted': decomposition.mode.wasDefaulted,
+        'mode_reason': decomposition.mode.reason,
+        'children': decomposition.children.length,
+        'waves': plan.waves.length,
+        'max_width': plan.maxWidth,
+        'widest_wave': permit.widestWave,
+        'shared_decisions': decomposition.sharedDecisions,
+        // A floor that permitted is a floor that ran. Without this number a
+        // permit is indistinguishable from a floor nobody consulted (INV8).
+        'floor_permitted': floor.permitted,
+        'layout': [
+          for (final wave in plan.waves)
+            {
+              'index': wave.index,
+              'children': [for (final c in wave.children) c.id],
+              'isolation_reason': ?wave.isolationReason,
+            },
+        ],
+      },
+    );
+    out.writeln('node $delegationId (the delegation)');
+
+    final runner = SessionRunner(
+      store: store,
+      gate: gate,
+      logDirectory: logDirectory,
+      executable: executable,
+    );
+
+    // Ctrl-C, over every live child at once. `RunCommand._watch` forwards
+    // SIGINT to its one process for a reason that gets worse with a wave: an
+    // interrupted verb that left its children running would leave several
+    // `claude` processes spending with nothing watching them.
+    final live = <String, LiveSession>{};
+    final interrupts = ProcessSignal.sigint.watch().listen((_) {
+      if (live.isEmpty) {
+        err.writeln('sprout: interrupted, nothing is running');
+        return;
+      }
+      err.writeln(
+        'sprout: interrupted, stopping '
+        '${live.values.map((s) => s.pid).join(', ')}',
+      );
+      for (final session in live.values) {
+        session.kill();
+      }
+    });
+
+    final report = _DelegateReport();
+    try {
+      for (final wave in plan.waves) {
+        out.writeln('wave ${wave.index}: ${wave.children.length} child(ren)');
+        if (wave.isolationReason case final reason?) {
+          out.writeln('  $reason');
+        }
+        final running = <Future<void>>[];
+        for (final child in wave.children) {
+          final started = await _startChild(
+            store: store,
+            runner: runner,
+            worktrees: worktrees,
+            decomposition: decomposition,
+            child: child,
+            delegationId: delegationId,
+            base: base,
+            report: report,
+          );
+          if (started == null) continue;
+          live[child.id] = started.session;
+          running.add(
+            _finishChild(
+              store: store,
+              worktrees: worktrees,
+              child: child,
+              started: started,
+              childTimeout: childTimeout,
+              report: report,
+            ).whenComplete(() => live.remove(child.id)),
+          );
+        }
+        // The wave is the unit: nothing in the next one starts until every
+        // child in this one has ended, been judged, and had its room dealt
+        // with. Waves are ordered because the children in different waves may
+        // touch the same files.
+        await Future.wait(running);
+      }
+    } finally {
+      await interrupts.cancel();
+      // Whatever happened, the delegation stops being live. A row left
+      // `working` holds a concurrency slot nothing releases (F-24), and this
+      // verb is in a position to not add to that.
+      final node = store.node(delegationId);
+      if (node != null) {
+        store.putNode(node.copyWith(status: NodeStatus.checkpointed));
+      }
+    }
+
+    report.write(out);
+    return report.exitCode;
+  }
+
+  /// Creates a child's worktree and launches its session, or reports why not.
+  ///
+  /// Null when nothing is running for this child — the worktree was refused,
+  /// git failed, the process could not start, or the containment gate said no.
+  /// Every one of those has already been reported and counted by the time this
+  /// returns, and in the three cases where a worktree was created and nothing
+  /// ran in it, it has already been removed.
+  Future<_StartedChild?> _startChild({
+    required SproutStore store,
+    required SessionRunner runner,
+    required Worktrees worktrees,
+    required Decomposition decomposition,
+    required PlannedChild child,
+    required String delegationId,
+    required String base,
+    required _DelegateReport report,
+  }) async {
+    // Read back for every child rather than once per wave. The gate's
+    // concurrency and budget checks are judged against the tree as it stands,
+    // and the children launched earlier in this same wave are part of it; a
+    // ledger read before the wave would under-count them and the gate could
+    // not say no (INV8).
+    final observed = readLedger(StoreSnapshotSource(store));
+    final nodeId = newNodeId();
+
+    final creation = await worktrees.create(nodeId: nodeId, base: base);
+    final WorktreeCreated room;
+    switch (creation) {
+      case WorktreeRefused(:final reason, :final explanation):
+        err.writeln(
+          'sprout: [${child.id}] no worktree (${reason.wire}) '
+          '$explanation',
+        );
+        report.notStarted(child.id, 'no worktree: ${reason.wire}');
+        return null;
+      case WorktreeCreateFailed(:final explanation):
+        err.writeln(
+          'sprout: [${child.id}] git could not make a worktree: $explanation',
+        );
+        report.notStarted(child.id, 'git could not make a worktree');
+        return null;
+      case WorktreeCreated():
+        room = creation;
+    }
+
+    final SessionStart start;
+    try {
+      start = await runner.launch(
+        SessionRequest(
+          // `briefFor`, never `child.task`. §2.3's Context column is the
+          // difference between map and build, and it is applied here or it is
+          // applied nowhere.
+          task: decomposition.briefFor(child),
+          project: room.path,
+          nodeId: nodeId,
+          parentId: delegationId,
+          // Unknown collapses to 0 only here, at the boundary where a
+          // `SpawnRequest` is built, because erring low errs toward the check
+          // that binds. The plan keeps the third state; see
+          // `PlannedChild.estimatedCostUsd`.
+          estimatedCostUsd: child.estimatedCostUsd ?? 0,
+        ),
+        ledger: observed.ledger,
+      );
+    } on ProcessException catch (error) {
+      err.writeln(
+        'sprout: [${child.id}] could not start the session: ${error.message}',
+      );
+      _recordWorktree(store, worktrees, nodeId, room);
+      await _tearDown(store, worktrees, nodeId, room, prefix: '[${child.id}] ');
+      report.notStarted(child.id, 'could not start: ${error.message}');
+      return null;
+    }
+
+    // After the launch, never before: `event.node_id` is a foreign key onto
+    // `node (id)` and `launch` is what writes that row.
+    _recordWorktree(store, worktrees, start.nodeId, room);
+
+    switch (start) {
+      case RefusedSession(:final refusal):
+        // F-26, reached for the first time. A wave is planned against the
+        // policy and admitted against the ledger, so the last child of a wave
+        // at the bound can be refused here. It is not a crash and it does not
+        // stop the run — and the room it would have used is removed at once,
+        // because nothing ever ran in it, so a refusal cannot leak a directory.
+        err.writeln(
+          'sprout: [${child.id}] refused (${refusal.reason.wire}) '
+          '${refusal.explanation}',
+        );
+        await _tearDown(
+          store,
+          worktrees,
+          start.nodeId,
+          room,
+          prefix: '[${child.id}] ',
+        );
+        report.refused(child.id, refusal.reason.wire);
+        return null;
+      case LiveSession():
+        out.writeln(
+          '[${child.id}] node ${start.nodeId}  pid ${start.pid}  ${room.path}',
+        );
+        return _StartedChild(session: start, room: room, nodeId: start.nodeId);
+    }
+  }
+
+  /// Watches one child to its end, judges it, and deals with its room.
+  Future<void> _finishChild({
+    required SproutStore store,
+    required Worktrees worktrees,
+    required PlannedChild child,
+    required _StartedChild started,
+    required Duration childTimeout,
+    required _DelegateReport report,
+  }) async {
+    final ended = await _watchChild(child.id, started.session, childTimeout);
+
+    final check = AcceptanceCheck();
+    final outcome = await check.judge(
+      returned: ChildReturn.of(ended),
+      conditions: child.successConditions,
+      workspace: started.room.path,
+    );
+    if (outcome.isAccepted) {
+      out.writeln('[${child.id}] acceptance ${outcome.label}');
+    } else {
+      err.writeln('sprout: [${child.id}] acceptance ${outcome.label}');
+    }
+    store.append(
+      nodeId: ended.nodeId,
+      kind: outcome.kind,
+      payload: {...outcome.toJson(), 'counts': check.counts.toWireMap()},
+    );
+    report.judged(child.id, outcome);
+
+    // Gated on the answer, and only on the answer. A rejected or undecidable
+    // child keeps its room, because the reason to look at a room after a run is
+    // to find out what went wrong in it. An accepted one is *offered* to
+    // `Worktrees.remove`, which still refuses on its own terms — acceptance is
+    // never authorization to destroy, and §6's "a brief is not a human" is the
+    // general form of that.
+    if (!outcome.isAccepted) {
+      err.writeln(
+        'sprout: [${child.id}] worktree kept, not accepted — '
+        '${started.room.path}',
+      );
+      report.worktreeKept();
+      return;
+    }
+    final removed = await _tearDown(
+      store,
+      worktrees,
+      started.nodeId,
+      started.room,
+      prefix: '[${child.id}] ',
+    );
+    if (removed) {
+      report.worktreeRemoved();
+    } else {
+      report.worktreeKept();
+    }
+  }
+
+  /// Streams one child, prefixed, and stops it if it never returns.
+  ///
+  /// **A child that never returns must not hold its wave for ever**, and every
+  /// wave after it. So the wait is bounded: at the deadline the process gets a
+  /// SIGTERM and a short grace, and then a SIGKILL, which closes its pipe and
+  /// lets the runner's pump finish. The session then ends with no `result`
+  /// frame, which the acceptance check rejects for `noResult` — the honest
+  /// outcome, arrived at through the same path as any other ending rather than
+  /// through a branch invented for the timeout.
+  Future<EndedSession> _watchChild(
+    String id,
+    LiveSession session,
+    Duration limit,
+  ) async {
+    final frames = session.frames.listen(
+      (frame) => printSessionFrame(frame, out: out, err: err, prefix: '[$id] '),
+    );
+    try {
+      try {
+        return await session.done.timeout(limit);
+      } on TimeoutException {
+        err.writeln(
+          'sprout: [$id] no ending after ${limit.inMilliseconds}ms, '
+          'stopping pid ${session.pid}',
+        );
+        session.kill();
+        try {
+          return await session.done.timeout(childKillGrace);
+        } on TimeoutException {
+          err.writeln(
+            'sprout: [$id] still there ${childKillGrace.inMilliseconds}ms '
+            'after SIGTERM, killing pid ${session.pid}',
+          );
+          session.kill(ProcessSignal.sigkill);
+          // Unbounded on purpose, and it is the one wait that can be: a
+          // SIGKILLed process cannot decline, so its pipe closes and the pump
+          // completes.
+          return await session.done;
+        }
+      }
+    } finally {
+      await frames.cancel();
+    }
+  }
+
+  /// Records the worktree a child is running in, on that child's own feed.
+  void _recordWorktree(
+    SproutStore store,
+    Worktrees worktrees,
+    String nodeId,
+    WorktreeCreated room,
+  ) {
+    store.append(
+      nodeId: nodeId,
+      kind: worktreeCreatedKind,
+      payload: {
+        'path': room.path,
+        'branch': room.branch,
+        'base': room.base,
+        'base_sha': room.baseSha,
+        'repository': worktrees.repositoryRoot,
+      },
+    );
+  }
+
+  /// Attempts the teardown, reports it either way, and says whether it removed.
+  Future<bool> _tearDown(
+    SproutStore store,
+    Worktrees worktrees,
+    String nodeId,
+    WorktreeCreated room, {
+    String prefix = '',
+  }) async {
+    final teardown = await worktrees.remove(
+      nodeId: nodeId,
+      baseSha: room.baseSha,
+    );
+    switch (teardown) {
+      case WorktreeRemoved():
+        out.writeln('${prefix}worktree ${teardown.label}');
+        store.append(
+          nodeId: nodeId,
+          kind: worktreeRemovedKind,
+          payload: teardown.toJson(),
+        );
+        return true;
+      case WorktreeKept():
+        err.writeln('sprout: ${prefix}worktree ${teardown.label}');
+        store.append(
+          nodeId: nodeId,
+          kind: worktreeKeptKind,
+          payload: teardown.toJson(),
+        );
+        return false;
+    }
+  }
+}
+
+/// A child whose session is running, with the room it is running in.
+final class _StartedChild {
+  const _StartedChild({
+    required this.session,
+    required this.room,
+    required this.nodeId,
+  });
+
+  final LiveSession session;
+  final WorktreeCreated room;
+  final String nodeId;
+}
+
+/// What a delegation did, as the ten seconds of it a human reads.
+///
+/// The counts are kept rather than derived from the store afterwards because
+/// the exit code has to distinguish four outcomes and a second derivation of
+/// the same facts is the shape F-01 was.
+final class _DelegateReport {
+  final List<String> accepted = [];
+  final List<String> rejected = [];
+  final List<String> undecidable = [];
+  final List<String> refusedChildren = [];
+  final List<String> unstarted = [];
+  int _removed = 0;
+  int _kept = 0;
+
+  void judged(String id, AcceptanceOutcome outcome) {
+    switch (outcome) {
+      case ChildAccepted():
+        accepted.add(id);
+      case ChildRejected(:final reason):
+        rejected.add('$id (${reason.wire})');
+      case AcceptanceUndecidable(:final reason):
+        undecidable.add('$id (${reason.wire})');
+    }
+  }
+
+  void refused(String id, String reason) =>
+      refusedChildren.add('$id ($reason)');
+
+  void notStarted(String id, String why) => unstarted.add('$id ($why)');
+
+  void worktreeRemoved() => _removed++;
+
+  void worktreeKept() => _kept++;
+
+  /// The exit code, worst first.
+  ///
+  /// **"sprout could not judge" outranks "sprout judged no."** An undecidable
+  /// child means a declared gate never ran, so the run's result about that
+  /// child is unknown rather than bad, and INV8 is exactly the rule that a
+  /// failure to look must not be folded into a verdict. A child that never
+  /// started comes next for the same reason — there is no verdict about it at
+  /// all — and a rejection, which is a real finding sprout actually made, is
+  /// last before success.
+  int get exitCode {
+    if (undecidable.isNotEmpty) return exitChildUndecidable;
+    if (refusedChildren.isNotEmpty || unstarted.isNotEmpty) return exitRefused;
+    if (rejected.isNotEmpty) return exitChildRejected;
+    return exitOk;
+  }
+
+  void write(StringSink out) {
+    out
+      ..writeln('result')
+      ..writeln(
+        '  accepted    ${accepted.length}'
+        '${accepted.isEmpty ? '' : '  ${accepted.join(', ')}'}',
+      )
+      ..writeln(
+        '  rejected    ${rejected.length}'
+        '${rejected.isEmpty ? '' : '  ${rejected.join(', ')}'}',
+      )
+      ..writeln(
+        '  undecidable ${undecidable.length}'
+        '${undecidable.isEmpty ? '' : '  ${undecidable.join(', ')}'}',
+      )
+      ..writeln(
+        '  refused     ${refusedChildren.length}'
+        '${refusedChildren.isEmpty ? '' : '  ${refusedChildren.join(', ')}'}',
+      )
+      ..writeln(
+        '  not started ${unstarted.length}'
+        '${unstarted.isEmpty ? '' : '  ${unstarted.join(', ')}'}',
+      )
+      ..writeln('  worktrees   removed $_removed, kept $_kept');
+  }
+}
+
+/// How long a child may run before `sprout delegate` stops it.
+///
+/// **A knob with nothing behind it, stated as one**, exactly as
+/// `defaultMaxLiveChildren` and `watchdogFrozenAfter` are. Nothing in the plan,
+/// the research or the Phase 0 captures fixes a number. It is here because the
+/// alternative is unbounded, and one child that never returns would hold its
+/// wave and every wave after it for ever, with `--max-budget-usd` as the only
+/// thing that ever ends it. Override it with `--child-timeout-ms`.
+const Duration defaultChildTimeout = Duration(minutes: 30);
+
+/// How long a child gets between SIGTERM and SIGKILL.
+///
+/// Short, and a knob too. A `claude` that has been asked to stop and has not
+/// stopped is a `claude` still spending.
+const Duration childKillGrace = Duration(seconds: 5);
+
+/// Prints one streamed frame for an operator watching a session.
+///
+/// Shared by `sprout run` and `sprout delegate` rather than written twice: the
+/// second verb watches several sessions at once, so it passes a [prefix]
+/// naming which child a line came from. With no prefix the output is byte for
+/// byte what `sprout run` printed before this function existed.
+void printSessionFrame(
+  StreamFrame frame, {
+  required StringSink out,
+  required StringSink err,
+  String prefix = '',
+}) {
+  switch (frame) {
+    case SystemInitFrame(:final model, :final sessionId):
+      out.writeln('${prefix}session $sessionId  model $model');
+    case AssistantFrame(:final message):
+      final text = message.text.trim();
+      if (text.isNotEmpty) out.writeln('$prefix$text');
+    case MalformedFrame():
+      err.writeln(
+        '${prefix}sprout: malformed line in stream, kept in the raw log',
+      );
+    default:
+      break;
   }
 }
 

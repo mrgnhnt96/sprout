@@ -1390,7 +1390,14 @@ final class DelegateCommand extends Command<int> {
         'sprout: [${child.id}] could not start the session: ${error.message}',
       );
       _recordWorktree(store, worktrees, nodeId, room);
-      await _tearDown(store, worktrees, nodeId, room, prefix: '[${child.id}] ');
+      await _tearDown(
+        store,
+        worktrees,
+        nodeId,
+        room,
+        report,
+        prefix: '[${child.id}] ',
+      );
       report.notStarted(child.id, 'could not start: ${error.message}');
       return null;
     }
@@ -1415,6 +1422,7 @@ final class DelegateCommand extends Command<int> {
           worktrees,
           start.nodeId,
           room,
+          report,
           prefix: '[${child.id}] ',
         );
         report.refused(child.id, refusal.reason.wire);
@@ -1470,18 +1478,14 @@ final class DelegateCommand extends Command<int> {
       report.worktreeKept();
       return;
     }
-    final removed = await _tearDown(
+    await _tearDown(
       store,
       worktrees,
       started.nodeId,
       started.room,
+      report,
       prefix: '[${child.id}] ',
     );
-    if (removed) {
-      report.worktreeRemoved();
-    } else {
-      report.worktreeKept();
-    }
   }
 
   /// Streams one child, prefixed, and stops it if it never returns.
@@ -1549,12 +1553,27 @@ final class DelegateCommand extends Command<int> {
     );
   }
 
-  /// Attempts the teardown, reports it either way, and says whether it removed.
-  Future<bool> _tearDown(
+  /// Attempts the teardown, and logs, stores and **counts** what it did.
+  ///
+  /// **The count is taken here rather than by the caller, because a caller
+  /// that forgets is invisible.** This used to hand its answer back as a
+  /// `bool` and leave the tally to each call site; two of the three discarded
+  /// it, so a delegation that removed two rooms printed `removed 0` under the
+  /// two lines saying it had removed them (P4-08). Nothing about that omission
+  /// showed up in the log, the store or the exit code — only in the one line a
+  /// human actually reads, and only as a count that could not be told from a
+  /// count of nothing (INV8). Reporting inside the teardown makes the same
+  /// mistake unavailable: there is no answer left to drop.
+  ///
+  /// The one kept room this does **not** account for is the room of a child
+  /// that was never accepted, because no teardown is attempted there at all —
+  /// see `_finishChild`, which counts it as kept on its own.
+  Future<void> _tearDown(
     SproutStore store,
     Worktrees worktrees,
     String nodeId,
-    WorktreeCreated room, {
+    WorktreeCreated room,
+    _DelegateReport report, {
     String prefix = '',
   }) async {
     final teardown = await worktrees.remove(
@@ -1569,7 +1588,7 @@ final class DelegateCommand extends Command<int> {
           kind: worktreeRemovedKind,
           payload: teardown.toJson(),
         );
-        return true;
+        report.worktreeRemoved();
       case WorktreeKept():
         err.writeln('sprout: ${prefix}worktree ${teardown.label}');
         store.append(
@@ -1577,7 +1596,7 @@ final class DelegateCommand extends Command<int> {
           kind: worktreeKeptKind,
           payload: teardown.toJson(),
         );
-        return false;
+        report.worktreeKept();
     }
   }
 }

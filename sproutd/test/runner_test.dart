@@ -12,6 +12,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:sproutd/policy.dart';
 import 'package:sproutd/runner.dart';
+import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
 import 'package:sproutd/stream.dart';
 import 'package:test/test.dart';
@@ -129,13 +130,17 @@ void main() {
     launcher: launcher,
   );
 
-  SessionRequest request({String nodeId = 'root', double estimate = 0}) =>
-      SessionRequest(
-        task: 'say hi',
-        project: tmp.path,
-        nodeId: nodeId,
-        estimatedCostUsd: estimate,
-      );
+  SessionRequest request({
+    String nodeId = 'root',
+    String? parentId,
+    double estimate = 0,
+  }) => SessionRequest(
+    task: 'say hi',
+    project: tmp.path,
+    nodeId: nodeId,
+    parentId: parentId,
+    estimatedCostUsd: estimate,
+  );
 
   List<SproutEvent> events([String? nodeId]) =>
       store.eventsSince(0, nodeId: nodeId);
@@ -170,13 +175,33 @@ void main() {
       'takes the budget from the policy: the tighter of the two ceilings',
       () {
         const policy = ContainmentPolicy(subtreeBudgetUsd: 2, runBudgetUsd: 5);
-        expect(rootBudgetUsd(policy, SpendLedger.empty()), 2.0);
+        expect(spawnBudgetUsd(policy, SpendLedger.empty()), 2.0);
         final spent = SpendLedger.of(const [
           NodeSpend(id: 'earlier', costUsd: 4.5),
         ]);
-        expect(rootBudgetUsd(policy, spent), closeTo(0.5, 1e-9));
+        expect(spawnBudgetUsd(policy, spent), closeTo(0.5, 1e-9));
       },
     );
+
+    test('a child is handed what its ancestors have left, not a fresh '
+        'ceiling', () {
+      const policy = ContainmentPolicy(subtreeBudgetUsd: 2, runBudgetUsd: 100);
+      final tree = SpendLedger.of(const [
+        NodeSpend(id: 'root', costUsd: 1.5),
+        NodeSpend(id: 'mid', parentId: 'root', costUsd: 0.25),
+      ]);
+      // A root sits under no ancestor, so it still sees only its own subtree
+      // ceiling and the run's remainder.
+      expect(spawnBudgetUsd(policy, tree), 2.0);
+      // Under `mid`, two ancestors bind: mid's own subtree holds \$0.25 and
+      // root's holds \$1.75. Root is the nearer to its ceiling and wins.
+      // Without this, a child under a nearly-spent parent would be launched
+      // with --max-budget-usd \$2.00 and could spend the ceiling twice.
+      expect(
+        spawnBudgetUsd(policy, tree, parentId: 'mid'),
+        closeTo(0.25, 1e-9),
+      );
+    });
   });
 
   group('the gate is consulted before the spawn', () {
@@ -247,6 +272,283 @@ void main() {
         ]);
       },
     );
+  });
+
+  group('the gate decides over the tree the store actually holds', () {
+    // P4-02. Every one of these builds a real tree in a real `SproutStore`,
+    // reads it back with `readLedger`, and asks for a child under a node in
+    // it. Each refusal is paired with the request as it was made BEFORE this
+    // leaf — no `parentId`, which is what every caller passed because the
+    // field did not exist — and each of those pairs is a permit. That is the
+    // negative control and it is the whole point: the gate ran on every
+    // launch, and could not have said no to any of them (INV8).
+
+    void put(
+      String id, {
+      String? parentId,
+      NodeStatus status = NodeStatus.checkpointed,
+    }) => store.putNode(
+      SproutNode(id: id, parentId: parentId, project: tmp.path, status: status),
+    );
+
+    /// Appends the frame a dollar figure actually arrives on.
+    void spend(String nodeId, double costUsd) => store.append(
+      nodeId: nodeId,
+      kind: resultEventKind,
+      payload: {totalCostUsdField: costUsd},
+    );
+
+    SpendLedger storeLedger() => readLedger(StoreSnapshotSource(store)).ledger;
+
+    /// Launches [request] and insists it was refused, returning why.
+    Future<SpawnRefusal> refusalOf(
+      SessionRequest request,
+      SpendLedger ledger,
+    ) async {
+      final launcher = FakeLauncher();
+      final start = await runner(launcher).launch(request, ledger: ledger);
+      expect(
+        start,
+        isA<RefusedSession>(),
+        reason: 'the gate permitted a spawn this tree should have refused',
+      );
+      // Nothing was started, which is the half a tally cannot show.
+      expect(launcher.launches, isEmpty);
+      return (start as RefusedSession).refusal;
+    }
+
+    /// Launches [request] and insists it was permitted, draining the process.
+    Future<LiveSession> permitOf(
+      SessionRequest request,
+      SpendLedger ledger,
+    ) async {
+      final start = await runner(_replaying(const <int>[]))
+          .launch(request, ledger: ledger);
+      expect(start, isA<LiveSession>());
+      final live = start as LiveSession;
+      await live.done;
+      return live;
+    }
+
+    group('the depth cap', () {
+      // root → n1 → n2 → n3, so a child of n3 would be the fifth level.
+      void chainOfFour() {
+        put('n0');
+        put('n1', parentId: 'n0');
+        put('n2', parentId: 'n1');
+        put('n3', parentId: 'n2');
+      }
+
+      test('refuses a child under a node at the cap, and counts it', () async {
+        chainOfFour();
+        final ledger = storeLedger();
+        expect(ledger.depthOf('n3'), 3, reason: 'the store really is 4 deep');
+
+        final refusal = await refusalOf(
+          request(nodeId: 'child', parentId: 'n3'),
+          ledger,
+        );
+        expect(refusal.reason, RefusalReason.depthCap);
+        expect(refusal.explanation, contains('depth 4'));
+        expect(gate.refusals[RefusalReason.depthCap], 1);
+
+        final recorded = events('child').last;
+        expect(recorded.kind, runnerRefusedKind);
+        expect(recorded.payload['reason'], 'depthCap');
+        expect(recorded.payload['refusals'], {
+          'depthCap': 1,
+          'budget': 0,
+          'concurrency': 0,
+        });
+      });
+
+      test(
+        'the same tree permits the same spawn with no parent named',
+        () async {
+          chainOfFour();
+          await permitOf(request(nodeId: 'child'), storeLedger());
+          expect(gate.permitted, 1);
+          expect(gate.refusals.total, 0);
+        },
+      );
+
+      test(
+        'an empty ledger cannot decide it at all, and writes nothing',
+        () async {
+          chainOfFour();
+          await expectLater(
+            runner(FakeLauncher()).launch(
+              request(nodeId: 'child', parentId: 'n3'),
+              ledger: SpendLedger.empty(),
+            ),
+            throwsArgumentError,
+          );
+          // Not a refusal, so not counted — and the row is not written either.
+          // A parent of unknown depth might be at depth 7, and a spawn nobody
+          // could decide must leave nothing behind that looks decided.
+          expect(gate.refusals.total, 0);
+          expect(gate.permitted, 0);
+          expect(store.node('child'), isNull);
+        },
+      );
+    });
+
+    group('the subtree budget', () {
+      // `_policy` allows $1 per subtree and $5 for the run, so a parent that
+      // has reported $1.20 has spent its subtree's ceiling and not the run's.
+      void overspentParent() {
+        put('parent');
+        spend('parent', 1.2);
+      }
+
+      test(
+        'refuses a child under a subtree that has spent its ceiling',
+        () async {
+          overspentParent();
+          final ledger = storeLedger();
+          expect(ledger.subtreeCostUsd('parent'), closeTo(1.2, 1e-9));
+
+          final refusal = await refusalOf(
+            request(nodeId: 'child', parentId: 'parent'),
+            ledger,
+          );
+          expect(refusal.reason, RefusalReason.budget);
+          expect(refusal.explanation, contains('subtree under parent'));
+          expect(gate.refusals[RefusalReason.budget], 1);
+          expect(events('child').last.payload['reason'], 'budget');
+        },
+      );
+
+      test(
+        'the same tree permits the same spawn with no parent named',
+        () async {
+          overspentParent();
+          // $1.20 is under the $5 run ceiling, and a root has no ancestor whose
+          // subtree ceiling could bind. So this is permitted, and was.
+          await permitOf(request(nodeId: 'child'), storeLedger());
+          expect(gate.permitted, 1);
+          expect(gate.refusals.total, 0);
+        },
+      );
+
+      test(
+        'an empty ledger sees no spend and no parent to charge it to',
+        () async {
+          overspentParent();
+          expect(SpendLedger.empty().subtreeCostUsd('parent'), 0);
+          await permitOf(request(nodeId: 'child'), SpendLedger.empty());
+          expect(gate.permitted, 1);
+        },
+      );
+    });
+
+    group('the concurrency bound', () {
+      void parentAtItsChildLimit() {
+        put('parent');
+        for (var i = 0; i < defaultMaxLiveChildren; i++) {
+          put('c$i', parentId: 'parent', status: NodeStatus.working);
+        }
+      }
+
+      test('refuses a child under a node already at maxLiveChildren', () async {
+        parentAtItsChildLimit();
+        final ledger = storeLedger();
+        expect(ledger.liveChildrenOf('parent'), defaultMaxLiveChildren);
+        // Below the tree-wide bound, so only the per-parent one can bite.
+        expect(ledger.liveNodes, lessThan(defaultMaxLiveNodes));
+
+        final refusal = await refusalOf(
+          request(nodeId: 'child', parentId: 'parent'),
+          ledger,
+        );
+        expect(refusal.reason, RefusalReason.concurrency);
+        expect(refusal.explanation, contains('$defaultMaxLiveChildren'));
+        expect(gate.refusals[RefusalReason.concurrency], 1);
+        expect(events('child').last.payload['reason'], 'concurrency');
+      });
+
+      test(
+        'the same tree permits the same spawn with no parent named',
+        () async {
+          parentAtItsChildLimit();
+          await permitOf(request(nodeId: 'child'), storeLedger());
+          expect(gate.permitted, 1);
+          expect(gate.refusals.total, 0);
+        },
+      );
+
+      test(
+        'an empty ledger has nobody live, so nothing to be at a limit',
+        () async {
+          parentAtItsChildLimit();
+          expect(SpendLedger.empty().liveNodes, 0);
+          await permitOf(request(nodeId: 'child'), SpendLedger.empty());
+          expect(gate.permitted, 1);
+        },
+      );
+    });
+
+    // Recorded as F-23. The concurrency bound is real now, and its
+    // denominator counts every node whose status is still `spawning` or
+    // `working` — including ones sprout cannot end.
+    test('a session that dies without a result stays live in the ledger, and '
+        'holds a concurrency slot nothing releases', () async {
+      // A stream that ends with no `result` frame: the process is gone and
+      // `SessionRunner` deliberately does not conclude completion from exit
+      // (INV12), so the row stays where it was.
+      final launcher = _replaying(utf8.encode('{"type":"system"}\n'));
+      final start = await runner(launcher).launch(request(nodeId: 'dead'));
+      await (start as LiveSession).done;
+
+      // `working` — moved there by the first frame and never moved off it.
+      expect(store.node('dead')!.status, NodeStatus.working);
+      // And so it is still live in the ledger the NEXT decision reads. There
+      // is no verb that moves it: the only writers of a node's status are the
+      // runner, the stream projection and the hook projection, and each moves
+      // a node only on evidence from a stream that has ended.
+      expect(readLedger(StoreSnapshotSource(store)).ledger.liveNodes, 1);
+    });
+
+    group('a permitted child', () {
+      test('is recorded under its parent and comes back at depth 1', () async {
+        put('parent');
+        final live = await permitOf(
+          request(nodeId: 'child', parentId: 'parent'),
+          storeLedger(),
+        );
+
+        // The permit is a value carrying the depth it decided on, not merely
+        // the absence of a refusal (INV8).
+        final spawned = events('child')
+            .firstWhere((e) => e.kind == runnerSpawnedKind);
+        expect((spawned.payload['permit']! as Map)['depth'], 1);
+
+        // Written onto the ROW, which is what makes the next decision right:
+        // read the store back and the child is in the tree at depth 1, so a
+        // grandchild under it is decided at depth 2 rather than at 0.
+        expect(store.node('child')!.parentId, 'parent');
+        expect(
+          readLedger(StoreSnapshotSource(store)).ledger.depthOf(live.nodeId),
+          1,
+        );
+      });
+
+      test(
+        'is launched with what its parent has left, not a fresh ceiling',
+        () async {
+          put('parent');
+          spend('parent', 0.75);
+          final live = await permitOf(
+            request(nodeId: 'child', parentId: 'parent'),
+            storeLedger(),
+          );
+          // `_policy` allows $1 per subtree and parent's holds $0.75, so the
+          // child may spend $0.25. Handed the full $1 it could take the subtree
+          // to $1.75 without --max-budget-usd ever objecting.
+          expect(double.parse(live.launch.arguments.last), closeTo(0.25, 1e-9));
+        },
+      );
+    });
   });
 
   group('replaying A.ndjson (one root, no subagents)', () {

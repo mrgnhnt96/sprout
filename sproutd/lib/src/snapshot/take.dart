@@ -48,24 +48,11 @@ SproutSnapshot takeSnapshot(
 }) {
   final takenAt = (now ?? DateTime.now)().toUtc();
 
-  // The feed first, then the graph. The order is load-bearing and the argument
-  // for it is on `StoreSnapshotSource`.
-  final feed = _readFeed(source);
-  final tree = source.tree();
-
-  final ownCostUsd = _ownCostsFrom(feed.events);
-  final ledger = SpendLedger.of([
-    for (final entry in tree)
-      NodeSpend(
-        id: entry.node.id,
-        parentId: entry.node.parentId,
-        // A node nobody reported a figure for contributes nothing to the sum,
-        // and is counted as unknown below. The two are not the same statement
-        // and only the second one survives into what is printed.
-        costUsd: ownCostUsd[entry.node.id] ?? 0,
-        isLive: isHoldingStatus(entry.node.status),
-      ),
-  ]);
+  final read = _read(source);
+  final feed = read.feed;
+  final tree = read.tree;
+  final ownCostUsd = read.ownCostUsd;
+  final ledger = read.ledger;
   final subtreeCounts = _countSubtrees(tree, ownCostUsd.keys.toSet());
 
   return SproutSnapshot(
@@ -86,6 +73,152 @@ SproutSnapshot takeSnapshot(
     ],
     resources: heldResourcesOf([for (final entry in tree) entry.node]),
     journalUnreadable: feed.unreadable,
+  );
+}
+
+/// The tree as the store recorded it, ready for a containment decision, with
+/// what could **not** be observed stated rather than folded in.
+///
+/// [ledger] is the same object `takeSnapshot` prints from, built by the same
+/// read, so the numbers `ContainmentGate` decides on and the numbers the UI
+/// shows cannot drift into two answers.
+///
+/// **The spend in it is a floor, and that is structural.** All six Phase 0
+/// captures carry `parent_tool_use_id: null` on every `result` frame, so
+/// `total_cost_usd` reaches the feed only for the node that owns the stream —
+/// a subagent's own dollars are not in the stream at all (INV7, INV13, and the
+/// `SubtreeSpend` note this repeats). A node nobody reported a figure for
+/// contributes 0 to [SpendLedger], because a ledger sums dollars and has no
+/// third state to sum; [unknownCostNodes] is where that omission is kept
+/// visible, and it is the caller's job to keep it visible too.
+///
+/// What that costs the budget bound is one-sided and worth stating plainly: a
+/// **refusal** on budget is sound — the observed spend really did breach the
+/// ceiling, and the unobserved part could only make it worse. A **permit** is
+/// not proof of being under budget, only proof that what was observed is under
+/// it. The depth cap and the concurrency bounds carry no such caveat: depth
+/// comes from `node.parent_id` and liveness from `node.status`, both of which
+/// the store holds for every node it knows about.
+final class ObservedLedger {
+  /// Records a ledger read off a store.
+  const ObservedLedger({
+    required this.ledger,
+    required this.nodes,
+    required this.unknownCostNodes,
+    this.journalUnreadable,
+  });
+
+  /// The tree, with depths, rolled-up spend and live counts.
+  final SpendLedger ledger;
+
+  /// How many nodes the store holds.
+  final int nodes;
+
+  /// How many of [nodes] reported no dollar figure, so contribute 0 to a sum
+  /// that is therefore a floor.
+  final int unknownCostNodes;
+
+  /// Why the event feed could not be read, or null if it was read.
+  ///
+  /// When this is set **nothing at all** is known about spend — every node is
+  /// unknown — and the ledger still carries honest depths and live counts,
+  /// because those come from the node graph. A caller that would enforce a
+  /// dollar ceiling must not treat this as "nothing spent"; that is the INV8
+  /// failure, a failed read reported as a fact about the world.
+  final String? journalUnreadable;
+
+  /// Whether every node in the ledger reported its own dollars.
+  bool get isSpendComplete =>
+      journalUnreadable == null && unknownCostNodes == 0;
+
+  /// One line saying what the dollar figures in here are worth, for a log or a
+  /// terminal. Never silent, because a budget check whose caveat is silence
+  /// cannot be told from one that had nothing to caveat (INV8).
+  String get spendLabel {
+    if (journalUnreadable case final reason?) {
+      return 'spend $unknownValueText over $nodes nodes '
+          '($journalUnreadableKey: $reason)';
+    }
+    final amount = '\$${ledger.totalCostUsd.toStringAsFixed(4)}';
+    return isSpendComplete
+        ? '$amount over $nodes nodes'
+        : '>=$amount over $nodes nodes ($unknownCostNodes unknown)';
+  }
+
+  @override
+  String toString() => 'ObservedLedger($spendLabel)';
+}
+
+/// Reads [source] into the ledger a containment decision is taken over.
+///
+/// The seam `ContainmentGate` was missing. `SpendLedger.of` takes values and
+/// `SpawnRequest` takes a ledger, but until this existed the only caller with
+/// a store in its hand — `SessionRunner.launch` — had nothing to build one
+/// from, so it fell back to `SpendLedger.empty()` on every launch and the
+/// depth cap, the subtree budget and the concurrency bounds were each decided
+/// over a tree with nothing in it. A gate that always says yes is
+/// indistinguishable from a gate that is not there (INV8).
+///
+/// Never throws for an unreadable **feed**, for [takeSnapshot]'s reason: the
+/// failure is reported on [ObservedLedger.journalUnreadable] rather than
+/// folded into a number. A failure to read the **node graph** does propagate —
+/// a ledger that could not read the graph is not a degraded ledger, it is not
+/// a ledger, and deciding a spawn over it would be deciding over nothing.
+ObservedLedger readLedger(SnapshotSource source) {
+  final read = _read(source);
+  return ObservedLedger(
+    ledger: read.ledger,
+    nodes: read.tree.length,
+    unknownCostNodes: [
+      for (final entry in read.tree)
+        if (!read.ownCostUsd.containsKey(entry.node.id)) entry,
+    ].length,
+    journalUnreadable: read.feed.unreadable,
+  );
+}
+
+/// One read of the store: the feed, the graph, and the ledger over both.
+final class _Read {
+  const _Read({
+    required this.feed,
+    required this.tree,
+    required this.ownCostUsd,
+    required this.ledger,
+  });
+
+  final _Feed feed;
+  final List<TreeNode> tree;
+  final Map<String, double> ownCostUsd;
+  final SpendLedger ledger;
+}
+
+/// The feed first, then the graph. The order is load-bearing and the argument
+/// for it is on `StoreSnapshotSource`.
+///
+/// One function so that [takeSnapshot] and [readLedger] cannot come to hold
+/// two different ideas of what the tree is — the picture a developer reads and
+/// the ledger a spawn is refused against are the same read.
+_Read _read(SnapshotSource source) {
+  final feed = _readFeed(source);
+  final tree = source.tree();
+  final ownCostUsd = _ownCostsFrom(feed.events);
+  return _Read(
+    feed: feed,
+    tree: tree,
+    ownCostUsd: ownCostUsd,
+    ledger: SpendLedger.of([
+      for (final entry in tree)
+        NodeSpend(
+          id: entry.node.id,
+          parentId: entry.node.parentId,
+          // A node nobody reported a figure for contributes nothing to the
+          // sum, and is counted as unknown by every caller of this. The two
+          // are not the same statement and only the second one survives into
+          // what is printed or decided on.
+          costUsd: ownCostUsd[entry.node.id] ?? 0,
+          isLive: isHoldingStatus(entry.node.status),
+        ),
+    ]),
   );
 }
 

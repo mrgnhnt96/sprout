@@ -3,7 +3,7 @@
 /// Six verbs:
 ///
 /// ```
-/// sprout run "<task>"
+/// sprout run [--parent <node>] "<task>"
 /// sprout snapshot [--json]
 /// sprout watch [--since <cursor>] [--json]
 /// sprout ui
@@ -19,10 +19,14 @@
 /// `SPROUT_DB` and `SPROUT_PORT` set by hand. [UiCommand] explains what that
 /// cost and why `.revali/` is now committed.
 ///
-/// `run` spawns exactly one `claude -p` session at depth 0 through
+/// `run` spawns exactly one `claude -p` session through
 /// `package:sproutd/runner.dart` and streams its events to disk and into the
-/// store. It spawns nothing else: delegation is Phase 4, and the runner it
-/// calls has no path that starts a child.
+/// store. It spawns nothing else — decomposition, waves and a worktree per
+/// child are the rest of Phase 4 — but since P4-02 the one session it spawns
+/// can be given a `--parent`, and the ledger it is judged against is read off
+/// the store rather than being empty. That is what makes the containment gate
+/// able to refuse: a depth, an ancestor's spent dollars and a live count all
+/// come from nodes the store already holds.
 ///
 /// `snapshot` and `watch` are Phase 2's observation protocol, taken whole from
 /// showrunner (`docs/01-plan.md` §7, §11): a snapshot is the whole world at one
@@ -296,6 +300,13 @@ final class RunCommand extends Command<int> {
             'each. Defaults to a sessions/ directory beside the database.',
       )
       ..addOption(
+        'parent',
+        help:
+            'The node id to spawn under. Omit for a root. The node must '
+            'already be in the store: a parent of unknown depth is one no '
+            'child beneath it can be bounded against.',
+      )
+      ..addOption(
         'budget-usd',
         help:
             'The dollar ceiling for the session, passed to claude as '
@@ -323,7 +334,8 @@ final class RunCommand extends Command<int> {
 
   @override
   String get description =>
-      'Spawn one claude -p session at depth 0 and stream its events to disk.';
+      'Spawn one claude -p session, under --parent or at depth 0, and stream '
+      'its events to disk.';
 
   @override
   String get invocation => 'sprout run [options] "<task>"';
@@ -359,6 +371,7 @@ final class RunCommand extends Command<int> {
         store: store,
         task: task,
         project: project,
+        parentId: results['parent'] as String?,
         budgetUsd: budget,
         logDirectory: logDirectory,
         executable: results['claude'] as String,
@@ -372,12 +385,16 @@ final class RunCommand extends Command<int> {
     required SproutStore store,
     required String task,
     required String project,
+    required String? parentId,
     required double budgetUsd,
     required String logDirectory,
     required String executable,
   }) async {
-    // One session, so one ceiling: the subtree and the run are the same
-    // thing at depth 0 with no children.
+    // One ceiling for the subtree and one for the run, both `--budget-usd`.
+    // They are the same number because this verb takes one number; they are
+    // still two bounds, and once a spawn has a parent they stop being the same
+    // question — the run's is charged across every tree in the store, the
+    // subtree's against each ancestor of this node.
     final gate = ContainmentGate(
       ContainmentPolicy(subtreeBudgetUsd: budgetUsd, runBudgetUsd: budgetUsd),
     );
@@ -388,9 +405,38 @@ final class RunCommand extends Command<int> {
       executable: executable,
     );
 
+    // The tree the gate decides over, read off this store. Without it every
+    // bound is judged against an empty ledger — depth 0, nothing spent, nobody
+    // live — and the gate cannot say no to anything (INV8).
+    final observed = readLedger(StoreSnapshotSource(store));
+    if (observed.journalUnreadable case final reason?) {
+      err
+        ..writeln(
+          'sprout: the event feed could not be read, so no spawn '
+          'beneath this store can be bounded on spend',
+        )
+        ..writeln(reason);
+      return exitStoreUnreadable;
+    }
+    if (parentId != null && !observed.ledger.contains(parentId)) {
+      err.writeln(
+        'sprout: --parent $parentId is not a node in ${store.databasePath}, '
+        'so its depth is unknown and no spawn beneath it can be bounded',
+      );
+      return exitUsage;
+    }
+    // Never silent, whichever way it went: a budget check whose caveat is
+    // silence cannot be told from one that had nothing to caveat (INV8). The
+    // dollars below are a floor whenever a node reported none — see
+    // `ObservedLedger`, and INV7.
+    out.writeln('tree ${observed.spendLabel}');
+
     final SessionStart start;
     try {
-      start = await runner.launch(SessionRequest(task: task, project: project));
+      start = await runner.launch(
+        SessionRequest(task: task, project: project, parentId: parentId),
+        ledger: observed.ledger,
+      );
     } on ProcessException catch (error) {
       err.writeln('sprout: could not start $executable: ${error.message}');
       return exitLaunchFailed;

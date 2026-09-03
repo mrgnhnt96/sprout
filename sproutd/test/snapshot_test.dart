@@ -310,6 +310,99 @@ void main() {
     });
   });
 
+  group('readLedger — the seam the containment gate was missing', () {
+    // Before P4-02 `SessionRunner.launch` had no way to build a ledger from a
+    // store, so it fell back to `SpendLedger.empty()` on every launch: depth 0,
+    // nothing spent, nobody live, every bound cleared by construction. These
+    // assert the ledger it now reads, and — the half that matters — that what
+    // could not be observed is still visible in it (INV7).
+
+    test('is the same read the snapshot prints from, not a second one', () {
+      final tree = twoBranchTree();
+      addTearDown(tree.close);
+      final source = StoreSnapshotSource(tree);
+      final observed = readLedger(source);
+      final snapshot = snapshotOf(source);
+
+      // Depths, rolled-up dollars and the node count all agree with the
+      // picture a developer reads. Two descriptions of one tree that agree
+      // today is exactly the drift `_read` exists to make impossible.
+      for (final node in snapshot.nodes) {
+        expect(observed.ledger.depthOf(node.node.id), node.depth);
+        expect(
+          observed.ledger.subtreeMicroUsd(node.node.id),
+          node.spend.knownMicroUsd,
+        );
+      }
+      expect(observed.nodes, snapshot.nodes.length);
+    });
+
+    test('carries unknown as unknown rather than folding it into the sum', () {
+      final tree = twoBranchTree();
+      addTearDown(tree.close);
+      final observed = readLedger(StoreSnapshotSource(tree));
+
+      // `a` and `a1x` reported no dollar figure. They contribute 0 to the
+      // ledger — a ledger sums dollars and has no third state to sum — and the
+      // count is what keeps that from reading as "they spent nothing".
+      expect(observed.ledger.totalCostUsd, closeTo(1.85, 1e-9));
+      expect(observed.unknownCostNodes, 2);
+      expect(observed.isSpendComplete, isFalse);
+      expect(observed.spendLabel, '>=\$1.8500 over 6 nodes (2 unknown)');
+    });
+
+    test('says so plainly when every node did report', () {
+      putNode(store, 'only');
+      appendResult(store, 'only', 0.25);
+      final observed = readLedger(StoreSnapshotSource(store));
+      expect(observed.isSpendComplete, isTrue);
+      expect(observed.unknownCostNodes, 0);
+      // No `>=`, and not silence either: the positive half of the rail needs
+      // its own bit or being satisfied looks like never having run (INV8).
+      expect(observed.spendLabel, '\$0.2500 over 1 nodes');
+    });
+
+    test('an unreadable feed is reported, never counted as nothing spent', () {
+      putNode(store, 'root');
+      putNode(store, 'child', parentId: 'root');
+      appendResult(store, 'root', 9.0);
+      final observed = readLedger(BrokenFeedSource(store));
+
+      expect(observed.journalUnreadable, contains('feed is gone'));
+      expect(observed.isSpendComplete, isFalse);
+      expect(observed.spendLabel, contains(journalUnreadableKey));
+      // A caller that read `totalCostUsd` alone would see $0.00 and conclude
+      // the run has its whole budget left, having in fact looked at nothing.
+      expect(observed.ledger.totalCostUsd, 0);
+      // The node graph is a separate read and it still stands: depth and the
+      // concurrency bounds are decidable here even though spend is not.
+      expect(observed.ledger.depthOf('child'), 1);
+      expect(observed.ledger.liveNodes, 2);
+    });
+
+    test('counts the live nodes and live children the bound is judged on', () {
+      putNode(store, 'parent', status: NodeStatus.checkpointed);
+      putNode(store, 'live1', parentId: 'parent');
+      putNode(store, 'live2', parentId: 'parent', status: NodeStatus.spawning);
+      putNode(store, 'done', parentId: 'parent', status: NodeStatus.cleared);
+      final observed = readLedger(StoreSnapshotSource(store));
+
+      expect(observed.ledger.liveChildrenOf('parent'), 2);
+      expect(observed.ledger.liveNodes, 2);
+    });
+
+    test('an empty store is a ledger with nothing in it, and says which', () {
+      final observed = readLedger(StoreSnapshotSource(store));
+      expect(observed.nodes, 0);
+      expect(observed.unknownCostNodes, 0);
+      expect(observed.ledger.liveNodes, 0);
+      // Complete because there is nothing it failed to observe — distinct from
+      // the unreadable-feed case above, which is the same $0.00 for the
+      // opposite reason.
+      expect(observed.isSpendComplete, isTrue);
+    });
+  });
+
   group('the three fields that survive any compression', () {
     test('next check-in prints NONE SCHEDULED rather than a blank', () {
       putNode(store, 'none');

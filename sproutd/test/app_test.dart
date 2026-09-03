@@ -490,6 +490,131 @@ void main() {
       expect(open(homeDb).tree(), hasLength(1));
     });
 
+    // P4-02. Until this, `run` built no ledger and `SessionRequest` had no
+    // parent, so every spawn was decided at depth 0 over an empty tree and the
+    // containment gate could not refuse any of them.
+    group('--parent', () {
+      /// The A.ndjson stand-in and the flags every run below shares.
+      List<String> flags(Directory dir) => [
+        '--claude',
+        _fakeClaude(dir, 'A.ndjson'),
+        '--db',
+        db(),
+        '--logs',
+        logs(),
+        '-C',
+        dir.path,
+      ];
+
+      /// The store's tree, read and closed rather than left open under the
+      /// next `run`.
+      List<TreeNode> tree() {
+        final store = SproutStore.open(path: db());
+        try {
+          return store.tree();
+        } finally {
+          store.close();
+        }
+      }
+
+      /// Spawns [task] under [parent] and returns the id of the new node.
+      Future<String> spawn(String task, {String? parent}) async {
+        final before = {for (final n in tree()) n.node.id};
+        final code = await run([
+          task,
+          if (parent != null) ...['--parent', parent],
+          ...flags(tmp),
+        ]);
+        expect(code, cli.exitOk, reason: err.toString());
+        final after = tree().where((n) => !before.contains(n.node.id));
+        return after.single.node.id;
+      }
+
+      test('puts the child under its parent, at a real depth', () async {
+        final rootId = await spawn('orchestrate');
+        final childId = await spawn('a piece of it', parent: rootId);
+
+        final nodes = {for (final n in tree()) n.node.id: n};
+        expect(nodes[childId]!.node.parentId, rootId);
+        expect(nodes[childId]!.depth, 1);
+        expect(nodes[rootId]!.node.parentId, isNull);
+        expect(_launches(tmp), 2);
+      });
+
+      test('hands the child what its parent has left, not the whole '
+          'ceiling', () async {
+        final rootId = await spawn('orchestrate');
+        await spawn('a piece of it', parent: rootId);
+
+        // A.ndjson reports $0.023741, so the root's subtree holds that much of
+        // the $1.00 ceiling and the child may have the rest. Handed a fresh
+        // $1.00 it could take the subtree to $1.98 with --max-budget-usd
+        // never objecting.
+        final argv = _argv(tmp);
+        expect(
+          double.parse(argv[argv.indexOf('--max-budget-usd') + 1]),
+          closeTo(1 - 0.023741, 1e-9),
+        );
+      });
+
+      test('refuses a fifth level, which is what the depth cap is', () async {
+        var parent = await spawn('depth 0');
+        for (final depth in [1, 2, 3]) {
+          parent = await spawn('depth $depth', parent: parent);
+        }
+        expect(tree().map((n) => n.depth), containsAll([0, 1, 2, 3]));
+
+        final launchesBefore = _launches(tmp);
+        final code = await run(['depth 4', '--parent', parent, ...flags(tmp)]);
+
+        expect(code, cli.exitRefused);
+        expect(err.toString(), contains('refused (depthCap)'));
+        expect(err.toString(), contains('depth 4'));
+        // Refused *before* the launch, which is the whole claim (INV14).
+        expect(_launches(tmp), launchesBefore);
+        final refusals = SproutStore.open(path: db());
+        addTearDown(refusals.close);
+        expect(
+          refusals.eventsSince(0).where((e) => e.kind == 'runner.refused'),
+          hasLength(1),
+        );
+      });
+
+      test('refuses a parent the store has never seen, before opening a '
+          'process', () async {
+        await spawn('orchestrate');
+        final launchesBefore = _launches(tmp);
+        final code = await run([
+          'orphan',
+          '--parent',
+          'no-such-node',
+          ...flags(tmp),
+        ]);
+
+        expect(code, cli.exitUsage);
+        expect(err.toString(), contains('is not a node in'));
+        // Not a refusal — an unknown parent has an unknown depth, so nothing
+        // beneath it can be bounded at all — so nothing was counted and no
+        // node row was written for it.
+        expect(_launches(tmp), launchesBefore);
+        expect(tree(), hasLength(1));
+      });
+
+      test('says what the dollar figures it decided on are worth', () async {
+        final rootId = await spawn('orchestrate');
+        await spawn('a piece of it', parent: rootId);
+
+        // Every node here is one sprout launched and owns the pipe for, so
+        // each reported its own `total_cost_usd` and the ledger is COMPLETE —
+        // no `>=`, no unknown count. The partial case is a subagent the
+        // platform spawned inside a session, whose dollars never reach the
+        // stream at all. Printed either way, because a caveat that is silence
+        // cannot be told from having nothing to caveat (INV8).
+        expect(out.toString(), contains('tree \$0.0237 over 1 nodes'));
+        expect(out.toString(), isNot(contains('unknown')));
+      });
+    });
+
     test('refuses to run without a task', () async {
       final code = await run(['--db', db()]);
       expect(code, cli.exitUsage);

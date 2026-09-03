@@ -44,6 +44,15 @@
 /// [takeSnapshot]. Importers of `package:sproutd/snapshot.dart` see no
 /// difference; the same declarations arrive from the same path.
 ///
+/// **[readLedger] is the same read, stopped one step earlier.** A containment
+/// decision needs the tree the store holds — depths from `parent_id`, live
+/// counts from `status`, rolled-up dollars from the feed — which is precisely
+/// what [takeSnapshot] assembles before it renders anything. So the ledger
+/// `ContainmentGate` decides over is built by the same function as the picture
+/// a developer reads, and the two cannot drift. It returns an [ObservedLedger]
+/// rather than a bare `SpendLedger` because the dollars in it are a **floor**
+/// and the count of what was not observed has to travel with them (INV7).
+///
 /// Implementation lives under `lib/src/snapshot/`, and under
 /// `sprout_protocol/lib/src/snapshot/` for the pure half.
 library;
@@ -52,4 +61,9 @@ export 'package:sprout_protocol/snapshot.dart';
 
 export 'src/snapshot/source.dart' show SnapshotSource, StoreSnapshotSource;
 export 'src/snapshot/take.dart'
-    show resultEventKind, takeSnapshot, totalCostUsdField;
+    show
+        ObservedLedger,
+        readLedger,
+        resultEventKind,
+        takeSnapshot,
+        totalCostUsdField;

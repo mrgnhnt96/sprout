@@ -253,6 +253,75 @@ doing as a side effect of this leaf.
 Until then a running hook-observed subagent is `unmeasured`, with a `because` that names what could
 not be looked at, and the watchdog lists it as blind rather than ringing about it.
 
+### F-23 — The subtree budget is one-sided: it can refuse honestly, it cannot permit honestly
+
+**Status: OPEN, and it may not be repairable from the data sprout has.** Found by P4-02, which is
+the leaf that made the containment gate live and therefore the first one for which this mattered.
+
+`readLedger` (`sproutd/lib/src/snapshot/take.dart`) builds the `SpendLedger` the gate decides over
+from the node graph and the feed. Depth comes from `node.parent_id` and liveness from
+`node.status`, and the store holds both for every node it knows about — so **the depth cap and the
+two concurrency bounds are enforced over complete data.** Spend is not. A node that reported no
+`total_cost_usd` contributes 0 to the ledger, because a ledger sums dollars and has no third state
+to sum, and the note below (*"Subtree spend is structurally partial by observation"*) says why that
+is the normal case rather than an edge one: all six Phase 0 captures carry `parent_tool_use_id:
+null` on every `result` frame, so a subagent's own dollars are not in the stream at all.
+
+The consequence is asymmetric, and it is the part worth carrying forward:
+
+- A **refusal** on budget is sound. The observed spend really did breach the ceiling, and the
+  unobserved part could only make it worse.
+- A **permit** is not evidence of being under budget. It is evidence that *what was observed* is
+  under it. `ObservedLedger.unknownCostNodes` and `spendLabel` are what stop that from being
+  silent — `sprout run` prints `>=$X over N nodes (k unknown)` before every launch — but printing
+  a caveat is not enforcing a bound.
+
+**What is NOT wrong here.** A tree sprout spawned *itself* is complete: each node is its own
+`claude -p` with its own pipe, so each reports its own `total_cost_usd`, and
+`test/app_test.dart`'s `sprout run --parent` group asserts the printed label carries no `>=` and no
+unknown count. The gap is exactly the nodes sprout *observes* rather than launches — Agent-tool
+subagents inside a session, and hook-ingested foreign sessions.
+
+**Why it was not repaired.** There is nothing to repair it *with*. Attributing a subagent's cost
+would mean either summing `usage` blocks against a per-model price table sprout does not have
+(`lib/policy.dart` says why token budgets are deliberately absent) or apportioning the root's total
+across its children — and a guessed total is indistinguishable from a measured one, which is INV7.
+Recording the limit is the honest outcome; a number that looked like evidence would be worse than
+the gap.
+
+---
+
+### F-24 — A node that dies without ending its stream holds a concurrency slot nothing releases
+
+**Status: OPEN.** Found by P4-02 and measured in `sproutd/test/runner_test.dart` ("a session that
+dies without a result stays live in the ledger, and holds a concurrency slot nothing releases").
+
+The concurrency bounds became real in P4-02 — before it they were judged against an empty ledger
+and could not bite. Their denominator is `SpendLedger.liveNodes` and `liveChildrenOf`, which count
+every node whose status `isHoldingStatus`: `spawning` or `working`.
+
+Only three things ever move a node off those statuses, and each needs evidence from a stream that
+ended cleanly — `SessionRunner` marks a root `checkpointed` only when the transcript carries a
+`result` (INV12: exit is not completion), `StoreProjection` marks a subagent `checkpointed` on its
+`completed` lifecycle event, and `HookProjection` does the same on `SessionEnd` / `Stop`. Nothing
+reaps. The watchdog measures and rings and is forbidden from acting, and `grep putNode lib/ bin/
+routes/` finds no fourth writer.
+
+So a session killed mid-stream — a closed terminal, a machine that slept, a `claude` that
+segfaulted — leaves a row that reads `working` forever. Twelve of those across a week reach
+`defaultMaxLiveNodes` and sprout refuses **every** spawn tree-wide with
+`RefusalReason.concurrency`, correctly by its own rules and wrongly in fact, with no verb to clear
+them.
+
+This compounds with **F-17**, which is the same absence one layer down: there is no `NodeStatus`
+meaning *the process is gone*, so even a human reading the board cannot tell a paused session from
+a dead one. Phase 6's `liveness` already derives live / stalled / abandoned from a pid beside a
+transcript mtime and is the obvious source of truth — but it may never act on what it finds, by
+design, so the repair is a decision about who is allowed to reconcile a row with a measurement, not
+a line in a projection.
+
+---
+
 ### F-22 — `showrunner integrate` re-runs only sproutd's three checks, whatever the change touched
 
 **Status: OPEN, and the fix is Morgan's** — `.showrunner/config.json` is harness config and is not
@@ -399,7 +468,16 @@ These are true, cost nothing to know, and would cost real time to rediscover.
   captures carry `parent_tool_use_id: null` on every `result` frame, so `total_cost_usd` exists
   only for the root. A subagent's own cost is `null`, never `0`, and a subtree with an unreported
   node renders `>=$X (n unknown)` rather than a total. Do not "fix" this into a sum: a sum is not a
-  distribution (INV7), and a guessed total is indistinguishable from a measured one. (P2-02)
+  distribution (INV7), and a guessed total is indistinguishable from a measured one. (P2-02) —
+  **P4-02 made this a property of a guardrail rather than only of a display**, which is F-23.
+- **The store-to-ledger seam is `readLedger`, and it is the same read `takeSnapshot` does.** P4-02
+  found the seam already half-built: `takeSnapshot` had been constructing `NodeSpend` values out of
+  `SnapshotSource.tree()` and the feed's `frame.result` events since P2-02, and building a real
+  `SpendLedger` from them — it was just private to that function, so `SessionRunner.launch` had
+  nothing to call and fell back to `SpendLedger.empty()`. It is now one `_read` shared by both, so
+  the ledger a spawn is refused against and the picture a developer reads cannot drift. Anything
+  that needs the tree as a *value* should call `readLedger` rather than fold the feed again.
+  (P4-02)
 - **`microUsd` / `formatUsd` are not exported from `lib/policy.dart`.** P2-02 used
   `SpendLedger.subtreeMicroUsd` plus a local formatter rather than edit a file outside its leaf.
   Subtree spend is quantised to micro-dollars (`0.2415507` → `0.241551`) while a node's *own* cost
@@ -409,7 +487,10 @@ These are true, cost nothing to know, and would cost real time to rediscover.
   StreamController-driven for exactly this reason. Any new long-lived stream should be too. (P2-03)
 - **`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` is not set from the policy**, so behaviour at the limit
   is unobserved. P1-04's concurrency defaults (4 per node, 12 tree-wide) have no research behind
-  them, unlike the depth cap of 3 — they are knobs, not findings. (Phase 1)
+  them, unlike the depth cap of 3 — they are knobs, not findings. Still true after P4-02, and now
+  the *second* of two enforcement paths rather than a hypothetical one: sprout's own gate refuses a
+  fifth level before the launch, and what the platform does at its own limit is still unmeasured.
+  (Phase 1, re-checked P4-02)
 - **`Notification`, `PreCompact` and `PostCompact` hook payloads remain uncaptured.** Nothing before
   Phase 5 needs them. They nevertheless have `hook.*` kinds as of P8-01, because a name that is
   known and unfired is a different thing from a name that is unknown — folding them into

@@ -79,6 +79,27 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// `workspace` is a first-class pubspec concept in Dart 3.6 and up, and this is
 /// a Dart monorepo, so a `lib/workspace.dart` would name the one thing in the
 /// repository it is not about.
+///
+/// `decomposition` is P4-04's: the value a parent produces when it decides to
+/// split a task, and the pure function that lays its children out into waves
+/// whose estimated file sets do not overlap. It is its own area rather than a
+/// corner of `policy` on the `liveness`/`watchdog` argument — the two answer
+/// different questions. `policy` asks what a node is *allowed* to start,
+/// judged against a `SpendLedger` at one moment; `decomposition` asks what
+/// *should* run together, judged against a plan and nothing else. The
+/// dependency runs one way (a wave is never planned wider than the gate could
+/// admit, and the gate knows nothing about plans), and `lib/policy.dart` says
+/// of itself that `ContainmentGate.admit` is "the only entry point", which a
+/// planner living there would make false.
+///
+/// Being an area is also what makes its one promise assertable:
+/// `test/decomposition_test.dart` greps the whole of `lib/src/decomposition/`
+/// for `dart:io`, `DateTime.now`, `Random` and `package:sqlite3` and asserts
+/// none appear, exactly as `test/worktree_test.dart` greps its area for
+/// `--force`. A planner whose output depends on a clock or on map iteration
+/// order is one nobody can diff, and a guard over a corner of another library
+/// would cover whichever files happened to sit beside it.
+///
 const libraries = {
   'store',
   'stream',
@@ -92,6 +113,7 @@ const libraries = {
   'watchdog',
   'hooks',
   'worktree',
+  'decomposition',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

@@ -479,6 +479,34 @@ graph has done that yet. So the entry is now **larger** than P4-04 left it, not 
 value types in this library are unreached rather than one, and P4-05 was the leaf the original
 entry named as the thing that would clear it.
 
+**Re-measured by P4-06, and it NARROWS for the first time — one type of the several is now
+reached.** The same grep, re-run verbatim after P4-06 landed, now matches `SuccessCondition` in
+three places outside `lib/src/decomposition/`: `bin/sprout.dart` (the `--accept-if` option, which
+constructs one per declared command), `lib/src/acceptance/` (which evaluates them), and
+`test/acceptance_test.dart`. So `SuccessCondition` has a real producer in the product entrypoint and
+a real consumer that runs it — it is no longer an island.
+
+**Everything else in the library is still unreached, and the grep still says so.** `Decomposition`,
+`PlannedChild`, `planWaves`, `WavePlan`, `DelegationFloor`, `DelegationPermit`, `DelegationRefusal`,
+`ModeChoice` and `FileEstimate` match nothing outside `lib/src/decomposition/`,
+`lib/decomposition.dart` and `test/decomposition_test.dart` except in **prose** — doc comments in
+`lib/src/acceptance/` and `test/acceptance_test.dart` that explain why an arm exists by naming
+`PlannedChild`'s constructor. A doc comment is not a caller.
+
+The reason P4-06 could reach one and not the rest is worth writing down, because it tells the next
+leaf what is actually missing. P4-06 evaluates a condition **against one finished child**, and a
+`SuccessCondition` can be handed to it by an operator on the command line, so it needed no planner.
+Everything else in the library describes a *split* — several children, laid out into waves, spawned
+under a parent — and nothing can produce one of those without wiring a parent's proposal to
+`SessionRunner.launch`. **That leaf still does not exist**, and it is still the one that clears the
+rest of this entry.
+
+One narrower gap inside the part that is now reached: `SuccessCondition.workingDirectory` has **no
+producer**. `--accept-if` always leaves it null, so the only thing that ever sets it is
+`test/acceptance_test.dart`. The field is read — `ProcessConditions` resolves it, and
+`.showrunner/p4-06-mutations.md` mutant 9 confirms a test detects it being ignored — but nothing in
+the product supplies one.
+
 ---
 
 ### F-28 — The delegation floor cannot decide whether a task is too small to split, and nothing sprout observes would let it
@@ -522,12 +550,60 @@ happened, never derived from the plan in front of it.
 
 ---
 
+### F-29 — Nothing in the capture corpus ends with a subtree that had not drained, so the guard against it is proved only against constructed values
+
+**Status: OPEN, and it is a gap in the evidence rather than in the code.** Found by P4-06, which
+built the acceptance check that reads the field, and measured rather than assumed.
+
+`AcceptanceCheck` refuses to accept a child whose subtree had not drained, reading
+`EndedSession.incompleteTasks` — the subagents whose last seen status was not `completed` when the
+process ended (INV12). The branch is real, it is tested, and mutant 3 in
+`.showrunner/p4-06-mutations.md` confirms neutering it fails two tests.
+
+**Measured, by folding every Phase 0 stream capture through `StreamTranscript.parse`:**
+
+```
+A: tasks=0 incomplete=0 background=[] hasResult=true results=1
+B: tasks=2 incomplete=0 background=[] hasResult=true results=2
+C: tasks=1 incomplete=0 background=[] hasResult=true results=1
+C2: tasks=1 incomplete=0 background=[] hasResult=true results=1
+D: tasks=0 incomplete=0 background=[] hasResult=true results=1
+E: tasks=0 incomplete=0 background=[] hasResult=true results=1
+```
+
+`incompleteTasks` is **empty in all six**, `B.ndjson` included — and B is the capture INV12 itself
+cites, where a subagent answered and stopped while its own child was still running. B's two
+`background_tasks_changed` frames are the proof it really happened: the first lists the async
+grandchild, the last is `"tasks":[]`. So the subtree *did* drain before the process ended, the
+second `result` frame is that grandchild's answer reaching the root, and a check run at process end
+correctly accepts it.
+
+**That is the finding.** The guard is right and the corpus cannot exercise it. Every test of the
+`subtreeNotDrained` arm builds a `ChildReturn` by hand, and INV8's whole argument is that a branch
+proved only against values the test wrote is one nobody has seen fire against reality. What is
+missing is a capture of a session **killed or ended while a subagent was still running** — the same
+gap F-20 names from the other side, where a `kill -9` produced `SessionStart` and
+`UserPromptSubmit` and nothing else.
+
+**A second, narrower gap in the same place.** `TaskLifecycles.backgroundTasks` is the full
+restatement of what is still running and is a strictly better signal than a status fold, and
+`EndedSession` does not expose it. `ChildReturn` therefore cannot read it, and deliberately does not
+recount it from the transcript — that would be two derivations of one rule, F-01's shape. The fix is
+one field on `EndedSession`, in the leaf that owns `runner`.
+
 ---
 
 ## Notes that are not findings
 
 These are true, cost nothing to know, and would cost real time to rediscover.
 
+- **`sprout run --accept-if` splits on whitespace and puts no shell in the gap.** A
+  `SuccessCondition` is an argv and a directory precisely so that what is declared and what executes
+  are the same text — an interpreter between them is F-08 in a different costume. So the flag's
+  value is split on runs of whitespace and every token reaches `Process.run` literally: no globbing,
+  no `$VAR`, no `&&`, no quoting. The cost is stated rather than worked around: **an argument
+  containing a space cannot be expressed by this flag.** If that ever bites, the fix is a second
+  spelling of the option that takes one token per occurrence, not a shell. (P4-06)
 - **A wildcard route cannot be reached through an empty-path controller in `revali_router` 5.1.1,
   and neither can a `:param` one.** `@Get('*asset')` under `@Controller('')` generates
   `Route('', routes: [Route('*asset', …)])`, which is well formed and never matches: `Find` walks

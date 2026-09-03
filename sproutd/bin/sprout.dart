@@ -65,6 +65,8 @@ import 'dart:io';
 
 import 'package:args/command_runner.dart';
 import 'package:path/path.dart' as p;
+import 'package:sproutd/acceptance.dart';
+import 'package:sproutd/decomposition.dart';
 import 'package:sproutd/hooks.dart';
 import 'package:sproutd/policy.dart';
 import 'package:sproutd/protocol.dart';
@@ -301,6 +303,29 @@ Future<int> sprout(
 /// refuses far more often than it succeeds, because a session's whole job is to
 /// leave changes behind; see `package:sproutd/worktree.dart`.
 ///
+/// **`--accept-if`, and what it gates.** `docs/01-plan.md` §5 puts a parent
+/// acceptance check between a session's ending and its close, and §2.4 says
+/// what it is allowed to be: a machine-checkable condition — *"tests, build,
+/// analyzer, diff applies"* — never a model's opinion. Each `--accept-if` is
+/// one such command, run in the session's own directory once it ends, and the
+/// three answers are on the feed as `acceptance.accepted`,
+/// `acceptance.rejected` and `acceptance.undecidable`. See
+/// `package:sproutd/acceptance.dart`.
+///
+/// It changes exactly one thing about this verb's behaviour: **the teardown is
+/// offered only to an accepted child.** A rejected or undecidable one keeps its
+/// worktree, because the reason to look at a room after a run is to find out
+/// what went wrong in it. With no `--accept-if` nothing is judged and the
+/// teardown is offered exactly as it was before — and the verb says which of
+/// the two happened, because "no condition was declared" and "the condition
+/// passed" must not look alike (INV8).
+///
+/// **Acceptance is never authorization to destroy.** An accepted child whose
+/// worktree holds uncommitted work is still kept, by `Worktrees.remove`'s own
+/// judgement, and the feed says so. §6's *"a brief is not a human"* is the
+/// general form: a parent judging a child cannot grant what only the developer
+/// can.
+///
 /// The worktree path goes in the node row's **`project`** column, and the
 /// repository root goes in the `worktree.created` payload. There is no column
 /// for a worktree path and `SproutStore`'s schema stays at version 1: this leaf
@@ -396,6 +421,16 @@ final class RunCommand extends Command<int> {
             'commit at creation, because the ref will have moved by the time '
             'anything tears the worktree down.',
         defaultsTo: 'HEAD',
+      )
+      ..addMultiOption(
+        'accept-if',
+        splitCommas: false,
+        help:
+            'A command that must exit 0 for this session\'s work to be '
+            'accepted, run in the session\'s own directory once it ends. '
+            'Repeat for more than one; they are checked in order and the '
+            'first failure decides. With --worktree, the teardown is only '
+            'offered when every one of them passed.',
       );
   }
 
@@ -456,6 +491,7 @@ final class RunCommand extends Command<int> {
         executable: results['claude'] as String,
         useWorktree: results['worktree'] as bool,
         base: results['base'] as String,
+        acceptIf: _acceptanceConditions(results['accept-if'] as List<String>),
       );
     } finally {
       store.close();
@@ -472,6 +508,7 @@ final class RunCommand extends Command<int> {
     required String executable,
     required bool useWorktree,
     required String base,
+    required List<SuccessCondition> acceptIf,
   }) async {
     // One ceiling for the subtree and one for the run, both `--budget-usd`.
     // They are the same number because this verb takes one number; they are
@@ -600,6 +637,7 @@ final class RunCommand extends Command<int> {
     }
 
     final int code;
+    EndedSession? ended;
     switch (start) {
       case RefusedSession(:final nodeId, :final refusal):
         err
@@ -607,8 +645,20 @@ final class RunCommand extends Command<int> {
           ..writeln(refusal.explanation);
         code = exitRefused;
       case LiveSession():
-        code = await _watch(start);
+        ended = await _watch(start);
+        code = _report(ended);
     }
+
+    // `docs/01-plan.md` §5's acceptance check, between the ending and the
+    // close. Null when no condition was declared — which is not the same as
+    // undecidable, and is why this is not a bool: undecidable means sprout was
+    // asked and could not answer, this means nobody asked.
+    final verdict = await _accept(
+      store: store,
+      conditions: acceptIf,
+      ended: ended,
+      workspace: project,
+    );
 
     // Attempted on every ending, including a refusal. A refused spawn started
     // no process, so its worktree is clean and the teardown really removes it;
@@ -616,11 +666,92 @@ final class RunCommand extends Command<int> {
     // the teardown will say so and keep it. Both are honest, and the refusal
     // case is what keeps the create-before-the-gate order above from leaking
     // a directory per refusal.
+    //
+    // **Gated on acceptance when there was one.** A child whose declared
+    // condition failed, or could not be evaluated, keeps its room: the whole
+    // reason to look at a worktree after a run is to find out what went wrong
+    // in it. `verdict == null` is the unchanged path — nobody declared a
+    // condition, so nothing was judged and the teardown is offered exactly as
+    // it was before. The teardown still refuses on its own terms either way;
+    // acceptance is never authorization to destroy.
     if (worktrees != null && room != null) {
-      await _tearDown(store, worktrees, start.nodeId, room);
+      if (verdict == null || verdict.isAccepted) {
+        await _tearDown(store, worktrees, start.nodeId, room);
+      } else {
+        err.writeln('sprout: worktree kept, ${verdict.label} — ${room.path}');
+      }
     }
     return code;
   }
+
+  /// Runs the acceptance check, records it, and answers what it said.
+  ///
+  /// Null when there was nothing to check: no `--accept-if` was given, or no
+  /// process ever ran. Neither is an [AcceptanceUndecidable] — that value means
+  /// sprout was asked to judge and could not, and manufacturing one here would
+  /// be reporting a check that never happened (INV8, from the permissive side).
+  ///
+  /// Never silent on any branch, for the same invariant read the other way: a
+  /// `--worktree` run whose teardown is *not* gated says so, because "no
+  /// condition was declared" and "the condition passed" must not look alike to
+  /// somebody reading the output.
+  Future<AcceptanceOutcome?> _accept({
+    required SproutStore store,
+    required List<SuccessCondition> conditions,
+    required EndedSession? ended,
+    required String workspace,
+  }) async {
+    if (ended == null || conditions.isEmpty) {
+      out.writeln(
+        'acceptance not checked: '
+        '${ended == null ? 'no session ran' : 'no --accept-if declared'}',
+      );
+      return null;
+    }
+    final check = AcceptanceCheck();
+    final outcome = await check.judge(
+      returned: ChildReturn.of(ended),
+      conditions: conditions,
+      workspace: workspace,
+    );
+    final line = 'acceptance ${outcome.label}';
+    if (outcome.isAccepted) {
+      out.writeln(line);
+    } else {
+      err.writeln('sprout: $line');
+    }
+    // The tally travels with the event that caused it, exactly as
+    // `runner.refused` carries the gate's running count. This CLI judges one
+    // child per invocation, so the count is small; it is on the row anyway,
+    // because a reader of the feed cannot otherwise tell a first judgement
+    // from a hundredth.
+    store.append(
+      nodeId: ended.nodeId,
+      kind: outcome.kind,
+      payload: {...outcome.toJson(), 'counts': check.counts.toWireMap()},
+    );
+    return outcome;
+  }
+
+  /// Turns every `--accept-if` value into a [SuccessCondition].
+  ///
+  /// **Whitespace is the only thing parsed, and there is no shell.** Each token
+  /// reaches `Process.run` exactly as it was typed: no globbing, no `$VAR`, no
+  /// `&&`, no quoting. That is the same rule `SuccessCondition` is shaped
+  /// around — an interpreter between the declaration and what executes is
+  /// finding F-08 in a different costume, where the text a guard reads is not
+  /// the text that runs. The cost is stated rather than worked around: an
+  /// argument containing a space cannot be expressed by this flag.
+  List<SuccessCondition> _acceptanceConditions(List<String> values) => [
+    for (final value in values)
+      if (value.trim().split(RegExp(r'\s+')) case final argv
+          when argv.isNotEmpty && argv.first.isNotEmpty)
+        SuccessCondition(argv)
+      else
+        usageException(
+          '--accept-if needs a command to run, and "$value" names none',
+        ),
+  ];
 
   /// Records the worktree a session is running in, on the node's own feed.
   ///
@@ -683,7 +814,7 @@ final class RunCommand extends Command<int> {
   /// Prints the session as it runs, forwarding Ctrl-C to the process so an
   /// interrupted `sprout run` does not leave a `claude` behind, still
   /// spending.
-  Future<int> _watch(LiveSession session) async {
+  Future<EndedSession> _watch(LiveSession session) async {
     out
       ..writeln('node ${session.nodeId}  pid ${session.pid}')
       ..writeln('log  ${session.rawLogPath}');
@@ -696,7 +827,7 @@ final class RunCommand extends Command<int> {
     try {
       final ended = await session.done;
       await frames.asFuture<void>().catchError((_) {});
-      return _report(ended);
+      return ended;
     } finally {
       await frames.cancel();
       await interrupts.cancel();

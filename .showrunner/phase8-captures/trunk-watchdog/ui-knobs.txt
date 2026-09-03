@@ -1,0 +1,4 @@
+http://127.0.0.1:8793/
+db  <scratch>/run3/sprout.db
+watchdog  sweep 3s · frozen after 12s · settle 1s → <scratch>/run3/watchdog.ndjson
+Ctrl-C to stop.

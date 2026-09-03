@@ -1,0 +1,30 @@
+   0.0s  launched a session sprout did NOT spawn: os pid 7095
+   1.0s  store recorded  node=hook/e2657ed3-eff1-4178-a94d-8d83d34abf59  pid=7095  observed_from=SessionStart
+   1.0s    transcript     /Users/USER/.claude/projects/-scratch-p8wd/e2657ed3-eff1-4178-a94d-8d83d34abf59.jsonl
+   1.0s  pid the watchdog will measure = 7095 ; the OS pid we launched = 7095 ; same = True
+   2.0s  transcript mtime before STOP: 1788395352.8  (ps state=SN)
+   3.0s  kill -STOP 7095  -> ps state=TN   (T = stopped)
+   4.0s  sweep swept=1 rang=0 silenced=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+   7.0s  sweep swept=1 rang=0 silenced=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  10.1s  sweep swept=1 rang=0 silenced=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  13.1s  sweep swept=1 rang=0 silenced=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  17.1s  sweep swept=1 rang=1 silenced=0 :: rang for 1 of 1 node(s): hook/e2657ed3-eff1-4178-a94d-8d83d34abf59 stalled
+  17.1s     RING #1  {"node_id": "hook/e2657ed3-eff1-4178-a94d-8d83d34abf59", "liveness": "stalled", "because": "pid 7095 is alive and started at 2026-09-03 00:29:11.000Z; the transcript last grew 15s ago (threshold 12s ago)", "consecutive_rings": 1, "at": "2026-09-03T00:29:28.723298Z", "pid": 7095, "frozen_for_sec": 15}
+  21.1s  sweep swept=1 rang=1 silenced=0 :: rang for 1 of 1 node(s): hook/e2657ed3-eff1-4178-a94d-8d83d34abf59 stalled
+  21.1s     RING #2  {"node_id": "hook/e2657ed3-eff1-4178-a94d-8d83d34abf59", "liveness": "stalled", "because": "pid 7095 is alive and started at 2026-09-03 00:29:11.000Z; the transcript last grew 19s ago (threshold 12s ago)", "consecutive_rings": 2, "at": "2026-09-03T00:29:32.734539Z", "pid": 7095, "frozen_for_sec": 19}
+  21.1s  transcript mtime while stopped: 1788395352.8 (unchanged = True), ps state=TN
+  22.1s  kill -CONT 7095  -> ps state=SN
+  24.1s  sweep swept=1 rang=0 silenced=0 :: no ring: 1 node(s) advanced, so their ring counts reset (hook/e2657ed3-eff1-4178-a94d-8d83d34abf59)
+  24.1s  ring count reset observed; watching three more sweeps
+  27.1s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  30.1s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  33.2s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  36.2s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  39.2s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  42.2s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  45.2s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  48.3s  sweep swept=1 rang=0 :: no ring: the 1 node(s) that could be measured were live or ended — no contradiction between what the tree records and what was observed
+  49.3s  rings=2  conted=True  reset_seen=True  ps state=ZN
+  49.3s  transcript mtime after CONT: 1788395387.6 (grew since freeze = True)
+  49.3s  letting the session finish on its own
+  49.3s  session exit code 0

@@ -1,0 +1,16 @@
+   0.0s  launched a session sprout did NOT spawn (PRE-FIX binary at 391b691): os pid 19403
+   0.0s  this session is alive and healthy for its whole life; it is never stopped
+   0.0s  baseline: 6 sweep records already in the journal
+   2.0s  sweep swept=1 rang=1 silenced=0 :: rang for 1 of 1 node(s): hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9 abandoned
+   2.0s     RING #1  {"node_id": "hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9", "liveness": "abandoned", "because": "no runner.spawned event for this node, and no ending recorded", "consecutive_rings": 1, "at": "2026-09-03T00:32:12.471563Z"}
+   6.0s  sweep swept=1 rang=1 silenced=0 :: rang for 1 of 1 node(s): hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9 abandoned
+   6.0s     RING #2  {"node_id": "hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9", "liveness": "abandoned", "because": "no runner.spawned event for this node, and no ending recorded", "consecutive_rings": 2, "at": "2026-09-03T00:32:16.476763Z"}
+  10.0s  sweep swept=1 rang=1 silenced=0 :: rang for 1 of 1 node(s): hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9 abandoned
+  10.0s     RING #3  {"node_id": "hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9", "liveness": "abandoned", "because": "no runner.spawned event for this node, and no ending recorded", "consecutive_rings": 3, "at": "2026-09-03T00:32:20.482377Z"}
+  14.1s  sweep swept=1 rang=0 silenced=1 :: no ring: 1 node(s) still contradicted but are at the ring cap of 3 (hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9) — silenced until each advances, not silenced for good
+  14.1s     SILENCED {"node_id": "hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9", "consecutive_rings": 3, "why": "still abandoned, and hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9 has rung 3 consecutive times with nothing changing, which is the cap of 3 \u2014 silenced until this node advances, not silenced for good"}
+  18.1s  sweep swept=1 rang=0 silenced=1 :: no ring: 1 node(s) still contradicted but are at the ring cap of 3 (hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9) — silenced until each advances, not silenced for good
+  18.1s     SILENCED {"node_id": "hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9", "consecutive_rings": 3, "why": "still abandoned, and hook/a7deeabf-f695-4f9d-83b1-a07e1a2d0cc9 has rung 3 consecutive times with nothing changing, which is the cap of 3 \u2014 silenced until this node advances, not silenced for good"}
+  19.1s  session exit code 0 ; rings while alive and healthy = 3
+  19.1s  events recorded by the PRE-FIX binary: 39 — ['hook.PostToolUse', 'hook.PreToolUse', 'hook.SessionEnd', 'hook.SessionStart', 'hook.Stop', 'hook.UserPromptSubmit', 'runner.observed', 'runner.updated']
+  19.1s  process.observed present (i.e. a pid was learned)? False

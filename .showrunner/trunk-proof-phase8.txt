@@ -263,3 +263,177 @@ test/watchdog_test.dart group "8 — a session sprout did not spawn (P8-04)":
   a tree holding both paths at once                        => no ring, 2 nodes swept
 
 No existing assertion was changed anywhere.
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+APPENDED: the watchdog half, RE-PROVED ON TRUNK against compiled binaries.
+
+The gap the Phase 8 handoff named: everything above about the watchdog was proved
+on the leaf's branch and in-process, folding a stored Phase 0 payload through the
+shipped HookProjection. This section closes that. Same claim, different evidence:
+two COMPILED binaries, real hand-started `claude -p` sessions registered through
+the block `sprout hooks install` prints, and a real SIGSTOP.
+═══════════════════════════════════════════════════════════════════════════════════
+
+TRUNK PROOF — the watchdog measures, rings at, and un-rings a session sprout did not spawn
+==========================================================================================
+Orchestrator session, 2026-09-02, main checkout at 1187ed3 (clean tree, nothing staged).
+
+Binaries under test
+  AFTER   trunk 1187ed3, `dart compile exe bin/sprout.dart` in sproutd/. 8,736,832 bytes.
+          No `revali build` step: Phase 8 changed no route, and .revali/ on trunk is
+          committed and current.
+  BEFORE  391b691 ("Merge branch 'showrunner/p8-03-sprout-hook-cli'") — P8-03 merged,
+          P8-04 NOT applied. Exported with `git archive 391b691 | tar -x` into a
+          directory outside the repo, `dart pub get`, then the same compile.
+          8,704,016 bytes. The main checkout was never moved off trunk.
+
+Method
+  `sprout hooks install` was run from EACH binary and its stdout used verbatim as a
+  `claude --settings` file. Nothing was written to ~/.claude/settings.json — that is
+  still Morgan's to install. Each compiled binary emitted its OWN absolute path as
+  the hook command (the `Platform.resolvedExecutable` trap P8-03 found does not bite
+  a compiled exe), so the settings file is usable as printed.
+  Each run got a fresh SPROUT_DB, its own daemon port, and the same demo knobs:
+
+    watchdog  sweep 3s · frozen after 12s · settle 1s
+    (SPROUT_WATCHDOG_SWEEP_MS=3000 _FROZEN_MS=12000 _SETTLE_MS=1000;
+     the shipped defaults are 30s / 5m / 5s and are knobs, not findings)
+
+  Every session below was started by hand from a directory outside this repo, with
+  --model haiku and --permission-mode bypassPermissions. sprout launched none of them
+  and owned no pipe to any of them.
+
+
+1. BEFORE — the pre-fix binary rings `abandoned` at a live, healthy, working session
+------------------------------------------------------------------------------------
+capture: .showrunner/phase8-captures/trunk-watchdog/before-391b691-live-session-rings-abandoned.txt
+
+A real session doing real work: `wc -l` over 15 files, one Bash call per file. It was
+never stopped, never killed, and it exited 0. Verbatim, timestamps relative to launch:
+
+   0.0s  launched a session sprout did NOT spawn (PRE-FIX binary at 391b691): os pid 19403
+   2.0s  sweep swept=1 rang=1 :: rang for 1 of 1 node(s): hook/a7deeabf-… abandoned
+   2.0s     RING #1  {"liveness": "abandoned", "because": "no runner.spawned event for this
+                      node, and no ending recorded", "consecutive_rings": 1}
+   6.0s     RING #2  … same, consecutive_rings 2
+  10.0s     RING #3  … same, consecutive_rings 3
+  14.1s  sweep rang=0 silenced=1 :: still contradicted but at the ring cap of 3
+  19.1s  session exit code 0 ; rings while alive and healthy = 3
+  19.1s  events recorded by the PRE-FIX binary: 39
+  19.1s  process.observed present (i.e. a pid was learned)? False
+
+  journal totals: 41 sweeps, 35 of them with the node in view, 3 rings, 2 silenced.
+
+Read the last two lines together. Ingest was already working at 391b691 — 39 events,
+PreToolUse/PostToolUse and all — so the board could SEE the session. What it could not
+do is measure it: no `process.observed`, therefore no pid, therefore
+`LivenessMeasure._newestSpawn` found no `runner.spawned` and fell through to
+`_whyNotStarted`. The page it produced was not "I cannot tell"; it was a confident
+`abandoned` about a process that was at that moment running `wc`.
+
+
+2. AFTER — trunk reads the same shape as live, for a whole session's life
+--------------------------------------------------------------------------
+capture: .showrunner/phase8-captures/trunk-watchdog/ui-knobs.txt (the daemon's own banner)
+
+First trunk run, a 25-call session left completely alone from SessionStart to
+SessionEnd (78s of work, then a clean ending):
+
+  $ sprout snapshot        # while it was running
+  cursor s1.2c129d12bacdc814.14
+  working · hook/cbd2b6da-d60c-4450-aa1e-38d8e4d5eac1 · P8WD-PROBE. Using the Bash tool,
+    run this exact command 25 times in a row … · since 00:22Z (0m) · next NONE SCHEDULED
+  holds <scratch> · hook/cbd2b6da-d60c-4450-aa1e-38d8e4d5eac1
+
+  event 2, from the store:
+  process.observed {"pid":70239,"raw_log":"/Users/USER/.claude/projects/…/cbd2b6da….jsonl",
+                    "session_id":"cbd2b6da-…","observed_from":"SessionStart"}
+
+  $ ps -o pid=,ppid=,command= -p 70239
+  70239 70236 /Users/USER/.local/bin/claude -p P8WD-PROBE. …
+
+  journal totals: 79 sweeps, 75 of them with the node in view, 0 rings, 0 silenced.
+
+The pid the watchdog recorded is the `claude` process itself, learned from CLAUDE_PID
+through the compiled `sprout hook`, and 75 consecutive sweeps over a live session and
+its ending produced no page. That is the same node shape section 1 rang at three times.
+
+
+3. AFTER — SIGSTOP makes it ring `stalled`, SIGCONT resets the count
+---------------------------------------------------------------------
+capture: .showrunner/phase8-captures/trunk-watchdog/after-trunk-stop-cont.txt
+
+The same real task as section 1 (`wc -l` over 15 files, one call each), under the trunk
+binary. Verbatim and unedited except for the ring payloads, which are trimmed to the
+fields that matter:
+
+   0.0s  launched a session sprout did NOT spawn: os pid 7095
+   1.0s  store recorded  node=hook/e2657ed3-…  pid=7095  observed_from=SessionStart
+   1.0s  pid the watchdog will measure = 7095 ; the OS pid we launched = 7095 ; same = True
+   2.0s  transcript mtime before STOP: 1788395352.8  (ps state=SN)
+   3.0s  kill -STOP 7095  -> ps state=TN   (T = stopped)
+   4.0s  sweep rang=0 :: no ring: the 1 node(s) … were live or ended
+   7.0s  sweep rang=0 :: no ring …
+  10.1s  sweep rang=0 :: no ring …
+  13.1s  sweep rang=0 :: no ring …
+  17.1s  sweep swept=1 rang=1 :: rang for 1 of 1 node(s): hook/e2657ed3-… stalled
+  17.1s     RING #1  liveness "stalled", consecutive_rings 1, pid 7095, frozen_for_sec 15,
+                     because "pid 7095 is alive and started at 2026-09-03 00:29:11.000Z;
+                     the transcript last grew 15s ago (threshold 12s ago)"
+  21.1s     RING #2  … consecutive_rings 2, frozen_for_sec 19
+  21.1s  transcript mtime while stopped: 1788395352.8 (unchanged = True), ps state=TN
+  22.1s  kill -CONT 7095  -> ps state=SN
+  24.1s  sweep rang=0 :: no ring: 1 node(s) advanced, so their ring counts reset (hook/e2657ed3-…)
+  27.1s → 48.3s  eight consecutive sweeps, rang=0, "live or ended"
+  49.3s  rings=2  conted=True  reset_seen=True
+  49.3s  transcript mtime after CONT: 1788395387.6 (grew since freeze = True)
+  49.3s  session exit code 0
+
+  journal totals: 102 sweeps, 95 with the node in view, 2 rings, 0 silenced.
+
+Four things in that trace are the proof, and each is an observation rather than a
+reading of the code:
+
+  · The four sweeps at 4-13s are AFTER the SIGSTOP and still say live. The watchdog is
+    not reacting to the signal; it is reacting to a transcript that stopped growing,
+    and it waits out its own threshold before it does.
+  · `ps state=TN` is the OS agreeing the process is suspended, and the pid in the ring
+    is the same pid the store learned from CLAUDE_PID and the same one we stopped.
+  · The transcript mtime is byte-identical across the freeze and strictly greater after
+    CONT — the "advanced" the ledger reset on is a real file that really grew.
+  · The session then finished its own work: 16 tool calls, 40 events in the store
+    (16 PreToolUse, 16 PostToolUse, SessionStart, UserPromptSubmit, Stop, SessionEnd,
+    plus runner.observed / process.observed / 2 × runner.updated), result "Total line
+    count across all 15 files: 135 lines", exit 0. The reset came from resumed work,
+    not from the session dying.
+
+
+4. A knob caveat worth writing down, measured on the way
+---------------------------------------------------------
+capture: .showrunner/phase8-captures/trunk-watchdog/after-trunk-stop-cont-thinking-turn.txt
+
+An earlier trunk run stopped a session that was mid-THINKING-turn rather than mid-tool-
+call: no tool use, one 18.1s API call. It rang `stalled` at 13s and 17s frozen, and on
+CONT the model emitted its answer, the count reset, Stop and SessionEnd fired.
+
+The ring was correct for the threshold it was given — the process was genuinely
+suspended — but the run makes the shape of the measure explicit: transcript growth is
+the only liveness signal for a hook-observed node, and a model that thinks for longer
+than `frozenAfter` without writing looks exactly like a frozen one. At the demo's 12s
+that is reachable by an ordinary turn; at the shipped default of 5 minutes it is not.
+This is a property of the knob, already documented as a knob in `watchdogFrozenAfter`,
+not a new finding — but it is now measured rather than assumed.
+
+
+5. What this section does NOT prove
+-------------------------------------
+  · Nothing here was seen in a browser. The board is still unpainted; §"Still not
+    verified, anywhere" in the handoff is unchanged.
+  · The hooks are still NOT installed in ~/.claude/settings.json. Every session above
+    was registered with `claude --settings <generated file>`, which is the same dodge
+    the ingest half used.
+  · F-20 is untouched. Nothing above kills a session, so nothing above re-exercises
+    "a closed terminal pages forever, three rings per `sprout ui` restart".
+  · A subagent under a hook-observed root is still `unmeasured` (F-21); every session
+    above is a root with no children.

@@ -1,9 +1,12 @@
 /// Splitting a task into children, and laying them out into waves.
 ///
 /// A parent that has decided to delegate produces a [Decomposition]: its own
-/// task, and the children it plans to spawn. [planWaves] turns that into an
-/// ordered [WavePlan] in which **no two children in a wave have overlapping
-/// estimated file sets, and any child whose estimate is unknown is alone.**
+/// task, the children it plans to spawn, and — required, never inferred — the
+/// [ModeChoice] saying whether this is map- or build-shaped work. [planWaves]
+/// turns that into an ordered [WavePlan] in which **no two children in a wave
+/// have overlapping estimated file sets, and any child whose estimate is
+/// unknown is alone.** [DelegationFloor] decides whether any of it should
+/// happen at all, and counts the times it said no.
 ///
 /// `docs/01-plan.md` §11 asks Phase 4 for *"waves over estimated file sets
 /// (unestimable ⇒ collides with everything)"*, taken from
@@ -47,12 +50,36 @@
 /// over a whole directory instead of over whichever files happen to sit beside
 /// it.
 ///
-/// **What is deliberately not here.** map versus build (`docs/01-plan.md` §2.3)
-/// and the delegation floor (§3) are P4-05's, so there is no `mode` field: an
-/// unused field with no producer is a decision made by whoever eventually
-/// guesses at it. Evaluating a [SuccessCondition] is P4-06's; this library only
-/// guarantees every child declares one. And nothing here is persisted — the
-/// store's schema is at version 1 and a decomposition has no table.
+/// **The two decisions P4-05 added, and where each one bites.** §2.3 requires
+/// sprout to *"pick the mode explicitly and default build for code"*, so
+/// [ModeChoice] carries both which mode is in force and **whether anybody
+/// chose** — [ModeChoice.defaulted] produces `build` and says out loud that it
+/// was nobody's decision, the way showrunner's `route` prints `NO RULE MATCHED
+/// — defaulted to serialized` rather than quietly serializing. The mode then
+/// has to change something or it is a field nobody reads, so it changes two
+/// things: [Decomposition.briefFor] pushes the parent's shared decisions down
+/// into every child in build and withholds them in map (§2.3's Context column),
+/// and [planWaves] narrows a build plan to [buildWaveWidth] (§2.3's *"narrow
+/// fan-out"*). A **map** decomposition may not carry shared decisions at all —
+/// the constructor refuses it, because decisions that have to reach the
+/// children mean the children are not independent.
+///
+/// §3's delegation floor is [DelegationFloor], and it is a **refusal that gets
+/// counted**, on `ContainmentGate`'s exact shape and for its measured reason:
+/// the platform counts only its own refusals, and a decision not to decompose
+/// makes no tool call at all, so it leaves no trace anywhere unless sprout
+/// writes it down. Read that class's doc for the part that matters most —
+/// **what it does not do.** It does not implement "plausibly beyond one
+/// session" and it computes no score, because neither of §3's two numbers is
+/// available at decision time. The rules it does apply are properties of the
+/// proposal's own layout, and the size gap it leaves open is `F-28`.
+///
+/// **What is still deliberately not here.** Evaluating a [SuccessCondition] is
+/// P4-06's; this library only guarantees every child declares one. Nothing here
+/// spawns, and a [DelegationRefusal] does not stop a caller — INV14's
+/// enforcement point is `ContainmentGate.admit`, before a process exists. And
+/// nothing here is persisted: the store's schema is at version 1 and a
+/// decomposition has no table.
 ///
 /// Implementation lives under `lib/src/decomposition/`. See `docs/01-plan.md`
 /// §2.3, §2.4, §3 and §11.
@@ -67,4 +94,14 @@ export 'src/decomposition/estimate.dart'
         TouchesNothing,
         UnknownFiles,
         pathsOverlap;
+export 'src/decomposition/floor.dart'
+    show
+        DelegationFloor,
+        DelegationPermit,
+        DelegationRefusal,
+        FloorCounts,
+        FloorDecision,
+        FloorReason;
+export 'src/decomposition/mode.dart'
+    show DelegationMode, ModeChoice, buildWaveWidth;
 export 'src/decomposition/waves.dart' show Wave, WavePlan, planWaves;

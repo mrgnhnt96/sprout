@@ -2,6 +2,7 @@
 library;
 
 import 'estimate.dart';
+import 'mode.dart';
 
 /// One machine-checkable condition a planned child must satisfy to be accepted.
 ///
@@ -72,10 +73,14 @@ final class SuccessCondition {
 /// `lib/policy.dart` gives about its own area: it is what makes the thing
 /// testable enough to be trusted. Nothing in this library spawns anything.
 ///
-/// **There is deliberately no `mode` field here.** map versus build
-/// (`docs/01-plan.md` §2.3) and the delegation floor (§3) are P4-05's leaf, and
-/// an unused field with no producer is a decision made by whoever eventually
-/// guesses at it. The seam is this sentence.
+/// **The mode lives on the [Decomposition], not here.** P4-04 left the seam
+/// open with the note that *"an unused field with no producer is a decision
+/// made by whoever eventually guesses at it"*; P4-05 filled it, and put the
+/// choice one level up because `docs/01-plan.md` §2.3 is about the shape of a
+/// *split* — whether the children are independent or have to compose — which
+/// is not a property any one child can hold. A per-child mode would let a
+/// parent declare half a fan-out map and half of it build, which is not a
+/// distinction §2.3 draws and not one the wave planner could act on.
 final class PlannedChild {
   /// Records a planned child.
   ///
@@ -189,10 +194,18 @@ final class PlannedChild {
 /// first-class branch — `docs/01-plan.md` §3 calls it the default for small
 /// tasks and *"the cheapest performance win in the whole design"* — but it is
 /// not a decomposition with zero children, it is the absence of one. Refusing
-/// the empty case here is what keeps that seam visible for P4-05, which owns
-/// the floor; representing it as an empty list would let a caller "decompose"
-/// into nothing and get a plan back that runs no work and says nothing is
-/// wrong.
+/// the empty case is what kept that seam visible for P4-05, which owns the
+/// floor; representing it as an empty list would let a caller "decompose" into
+/// nothing and get a plan back that runs no work and says nothing is wrong.
+/// `DelegationFloor` is the other half of that seam: a decomposition is a
+/// *proposal*, and the floor is what decides whether making it was worth the
+/// coordination it costs.
+///
+/// **Every decomposition carries a [ModeChoice], and it is required.** §2.3
+/// says sprout must *"pick the mode explicitly and default build for code"*, so
+/// an unset mode is not `map` and not anything else — it does not compile. The
+/// only way to take the default is [ModeChoice.defaulted], which produces
+/// `build` and records that nobody chose it.
 final class Decomposition {
   /// Records a parent's decision to split [task] into [children].
   ///
@@ -205,6 +218,8 @@ final class Decomposition {
     required String parentId,
     required String task,
     required List<PlannedChild> children,
+    required ModeChoice mode,
+    List<String> sharedDecisions = const [],
   }) {
     final trimmedParent = parentId.trim();
     if (trimmedParent.isEmpty) {
@@ -227,14 +242,44 @@ final class Decomposition {
         throw ArgumentError.value(child.id, 'children', 'duplicate child id');
       }
     }
+    final decisions = <String>[];
+    for (final decision in sharedDecisions) {
+      final trimmed = decision.trim();
+      if (trimmed.isEmpty) {
+        throw ArgumentError.value(
+          sharedDecisions,
+          'sharedDecisions',
+          'contains a blank decision',
+        );
+      }
+      decisions.add(trimmed);
+    }
+    if (!mode.isBuild && decisions.isNotEmpty) {
+      throw ArgumentError.value(
+        sharedDecisions,
+        'sharedDecisions',
+        'is not empty on a map decomposition. §2.3 maps by *isolating* child '
+            'context; a parent with decisions that have to reach its children '
+            'has children that are not independent, which is the definition of '
+            'build-shaped work. Declare build, or drop the decisions',
+      );
+    }
     return Decomposition._(
       trimmedParent,
       task.trim(),
       List.unmodifiable(children),
+      mode,
+      List.unmodifiable(decisions),
     );
   }
 
-  const Decomposition._(this.parentId, this.task, this.children);
+  const Decomposition._(
+    this.parentId,
+    this.task,
+    this.children,
+    this.mode,
+    this.sharedDecisions,
+  );
 
   /// The node doing the splitting.
   final String parentId;
@@ -244,6 +289,89 @@ final class Decomposition {
 
   /// The children, in the parent's order. Never empty, ids unique.
   final List<PlannedChild> children;
+
+  /// map or build, and whether anybody chose (`docs/01-plan.md` §2.3).
+  ///
+  /// Read by [briefFor], which pushes [sharedDecisions] down only in build, and
+  /// by `planWaves`, which narrows a build plan to `buildWaveWidth`. A mode
+  /// nothing read would be a field, not a decision.
+  final ModeChoice mode;
+
+  /// What the parent has already settled, which every child must follow rather
+  /// than re-decide. Empty unless [mode] is build.
+  ///
+  /// This is §2.3's Context column for build — *"push shared decisions down"*
+  /// — as a real field rather than an instruction to whoever writes the
+  /// briefs. The failure it exists against is the one the plan names: children
+  /// that each re-decide the same thing produce *"a Mario background and a bird
+  /// that isn't Flappy"*, and the decisions were never in dispute, only never
+  /// transmitted.
+  ///
+  /// A **map** decomposition may not carry any, and the constructor refuses one
+  /// that does. Map isolates context by definition, so decisions that have to
+  /// reach the children mean the children are not independent; letting both
+  /// coexist would leave the field silently dropped at [briefFor], which is the
+  /// same class of bug one layer down.
+  final List<String> sharedDecisions;
+
+  /// The prompt [child] is actually given — the first place [mode] bites.
+  ///
+  /// §2.3's Context column, as two branches:
+  ///
+  /// - **map** hands over the child's own task and **nothing else**. That is
+  ///   *"isolate"*, and the evidence behind it (RAH 81→90%, Anthropic +90.2%)
+  ///   is about children that do not share context, so adding the parent's
+  ///   framing back in would be running build's context policy under map's
+  ///   name.
+  /// - **build** carries the parent's own [task] down as well, and then every
+  ///   one of its [sharedDecisions]. Build children produce artifacts that have
+  ///   to compose, and a child that does not know what whole it is part of
+  ///   re-decides that for itself — *"a Mario background and a bird that isn't
+  ///   Flappy"* is four children each answering a question the parent had
+  ///   already answered and never transmitted.
+  ///
+  /// The parent's task is in the build branch and not only the decisions
+  /// because it makes the two branches differ for **every** decomposition. This
+  /// was found by mutation, per INV8: an earlier version differed only by
+  /// [sharedDecisions], and since the constructor already refuses a map
+  /// decomposition that carries any, no constructible input could tell the two
+  /// branches apart — a `briefFor` mutated to push decisions down in map too
+  /// passed the whole suite. The guarantee was really the constructor's, and
+  /// this method's switch was decoration that read like enforcement.
+  ///
+  /// **What this still does not catch,** per INV6: nothing here checks that the
+  /// child *read* the decisions, only that they were in the brief it was given.
+  /// INV11 is the general form — a message that was accepted is not an
+  /// instruction that was obeyed — and the acceptance check for a child's work
+  /// is P4-06's `SuccessCondition`, not this string.
+  ///
+  /// Throws [ArgumentError] if [child] is not one of this decomposition's, so a
+  /// brief cannot be built from a decomposition that never planned the child it
+  /// describes.
+  String briefFor(PlannedChild child) {
+    if (!children.any((c) => identical(c, child) || c.id == child.id)) {
+      throw ArgumentError.value(
+        child.id,
+        'child',
+        'is not a child of this decomposition, so its brief would carry '
+            'decisions made for a different split',
+      );
+    }
+    return switch (mode.mode) {
+      DelegationMode.map => child.task,
+      DelegationMode.build => [
+        child.task,
+        '',
+        'This is one part of: $task',
+        if (sharedDecisions.isNotEmpty) ...[
+          '',
+          'Decisions the parent has already made. Follow them; do not '
+              're-decide them:',
+          for (final decision in sharedDecisions) '- $decision',
+        ],
+      ].join('\n'),
+    };
+  }
 
   /// The children nobody could estimate a file set for, in order.
   ///
@@ -270,5 +398,5 @@ final class Decomposition {
   @override
   String toString() =>
       'Decomposition($parentId → ${children.length} children, '
-      '${unestimableChildren.length} unestimable)';
+      '${unestimableChildren.length} unestimable, ${mode.label})';
 }

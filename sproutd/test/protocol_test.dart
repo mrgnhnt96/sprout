@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:sproutd/hooks.dart';
+import 'package:sproutd/liveness.dart';
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
@@ -1000,6 +1001,50 @@ void main() {
         }),
         isEmpty,
       );
+    });
+  });
+
+  group('and the process record, which belongs to neither path', () {
+    // P8-04. `HookProjection` writes this for a session sprout did not launch,
+    // and `LivenessMeasure` reads it through `spawnRecordKinds` alongside
+    // `runner.spawned`. Same payload keys, different kind — the measurement is
+    // genuinely the same measurement, and the feed must not say sprout
+    // launched a process it only ever watched.
+
+    test('process.observed keeps its spelling', () {
+      // As load-bearing as `runner.spawned`: a rename with no compile error
+      // makes every hook-observed session read as `abandoned` again, which is
+      // a watchdog paging about every terminal a developer has open.
+      expect(observedProcessKind, 'process.observed');
+    });
+
+    test('and it is not a hook kind, a runner kind or a frame kind', () {
+      // Not `hook.` because every `hook.*` row is one delivered payload stored
+      // verbatim and this is sprout's own derived record — a consumer reading
+      // the prefix as "the bytes Claude Code sent" would be wrong about it.
+      // Not `runner.` because sprout did not spawn this process.
+      expect(observedProcessKind, isNot(startsWith(hookKindPrefix)));
+      expect(observedProcessKind, isNot(startsWith(frameKindPrefix)));
+      expect(observedProcessKind, isNot(startsWith('runner.')));
+      expect({
+        ...hookKindsByEventName.values,
+        hookUnknownKind,
+        hookMalformedKind,
+        nodeObservedKind,
+        nodeUpdatedKind,
+        runnerSpawnedKind,
+        runnerRefusedKind,
+        runnerLaunchFailedKind,
+        runnerSessionKind,
+        runnerExitedKind,
+      }, isNot(contains(observedProcessKind)));
+    });
+
+    test('and the measurement reads exactly the two spawn kinds', () {
+      // The set, not a second copy of the strings: `LivenessMeasure` imports
+      // this declaration, so a third producer has one place to register and a
+      // rename is a compile error rather than something a test has to notice.
+      expect(spawnRecordKinds, {runnerSpawnedKind, observedProcessKind});
     });
   });
 }

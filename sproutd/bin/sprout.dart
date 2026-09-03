@@ -1239,6 +1239,11 @@ final class HookCommand extends Command<int> {
       final nodeId = HookProjection(
         store: store,
         clock: DateTime.now,
+        // The hook process's own environment, which is the only place
+        // `CLAUDE_PID` exists — a payload carries no process identifier at
+        // all. It is the same injected map every other verb reads, so a test
+        // drives this without setting a real environment variable.
+        environment: environment,
       ).observe(record);
       if (nodeId == null) {
         // The other half of F-18, and the one that is not malformed input: a

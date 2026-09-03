@@ -49,14 +49,19 @@ library;
 // and where the runner writes them from. Re-exported here so every importer
 // that got them from this library still does.
 export 'package:sprout_protocol/values.dart'
-    show runnerLaunchFailedKind, runnerRefusedKind, runnerSpawnedKind;
+    show
+        observedProcessKind,
+        runnerLaunchFailedKind,
+        runnerRefusedKind,
+        runnerSpawnedKind;
 
 export 'src/liveness/measure.dart'
     show
         LivenessMeasure,
         defaultFrozenAfter,
         defaultStartTimeTolerance,
-        endedStatuses;
+        endedStatuses,
+        spawnRecordKinds;
 export 'src/liveness/process_probe.dart'
     show
         ProcessGone,

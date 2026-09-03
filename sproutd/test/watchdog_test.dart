@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:sproutd/hooks.dart';
 import 'package:sproutd/liveness.dart';
 import 'package:sproutd/protocol.dart';
 import 'package:sproutd/store.dart';
@@ -32,6 +33,13 @@ const pastFrozen = Duration(milliseconds: 2600);
 
 /// A settle that a test can wait out. The shipped default is five seconds.
 const testSettle = Duration(milliseconds: 120);
+
+/// The 37 hook payloads captured in Phase 0.
+///
+/// Group 8 folds real captures through `HookProjection` rather than writing
+/// rows, for `hooks_test.dart`'s reason: a test that writes the rows itself
+/// proves nothing about whether the projection writes them.
+const String hookFixtures = '../docs/research/fixtures/phase0/hooks';
 
 void main() {
   late Directory dir;
@@ -828,6 +836,218 @@ void main() {
       final frame = watchdogFrameFor(sweep, at: at);
       expect(frame.stalled.map((n) => n.nodeId), ['both-1']);
       expect(frame.blind.map((n) => n.nodeId), ['both-2']);
+    });
+  });
+
+  group('8 — a session sprout did not spawn (P8-04)', () {
+    // Filled by folding real Phase 0 hook payloads through `HookProjection`,
+    // never by writing rows. The whole question this group answers is whether
+    // the watchdog rings on the session most likely to be silently stuck: the
+    // one a developer started in a terminal, which sprout can only ever see
+    // through a hook.
+
+    const String foreignSession = 'f0f0f0f0-0000-4000-8000-00000000c0de';
+    final String rootId = HookProjection.rootNodeId(foreignSession);
+    const String childAgentId = 'aab408509339890dd';
+
+    Map<String, Object?> payload(String relative, {String? transcript}) => {
+      ...jsonDecode(File('$hookFixtures/$relative').readAsStringSync())
+          as Map<String, Object?>,
+      'session_id': foreignSession,
+      'transcript_path': ?transcript,
+    };
+
+    void fold(List<Map<String, Object?>> payloads, {required int pid}) {
+      final projection = HookProjection(
+        store: store,
+        clock: () => DateTime.now().toUtc(),
+        environment: {
+          claudePidEnvVariable: '$pid',
+          claudeSessionIdEnvVariable: foreignSession,
+        },
+      );
+      for (final one in payloads) {
+        projection.observe(HookRecord.parse(jsonEncode(one)));
+      }
+    }
+
+    test('a stalled foreign session rings, and the page is readable', () async {
+      final process = await sleeper('foreign-stall');
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('foreign-stall'),
+        ),
+        payload(
+          'A/1788280943.696918-UserPromptSubmit.stdin.json',
+          transcript: transcriptPath('foreign-stall'),
+        ),
+      ], pid: process.pid);
+      // One line after the record, then silence — a session that started, said
+      // something, and wedged.
+      File(transcriptPath('foreign-stall'))
+          .writeAsStringSync('{"hello":true}\n', mode: FileMode.append);
+      await Future<void>.delayed(pastFrozen);
+
+      final sweep = await watchdogOver().sweepOnce();
+
+      expect(bell.rings, hasLength(1));
+      final ring = bell.rings.single;
+      expect(ring.nodeId, rootId);
+      expect(ring.liveness, Liveness.stalled);
+      expect(ring.pid, process.pid);
+      expect(ring.because, contains('pid ${process.pid} is alive'));
+      expect(ring.because, contains('the transcript last grew'));
+      expect(sweep.why, contains('$rootId stalled'));
+      // And the feed does not claim sprout launched it.
+      expect(
+        store
+            .eventsSince(0, nodeId: rootId)
+            .map((e) => e.kind)
+            .where((k) => k == runnerSpawnedKind),
+        isEmpty,
+      );
+    });
+
+    test(
+      'the same session after Stop never rings, however long it sits',
+      () async {
+        final process = await sleeper('foreign-idle');
+        fold([
+          payload(
+            'A/1788280943.420722-SessionStart.stdin.json',
+            transcript: transcriptPath('foreign-idle'),
+          ),
+          payload(
+            'A/1788280949.837870-Stop.stdin.json',
+            transcript: transcriptPath('foreign-idle'),
+          ),
+        ], pid: process.pid);
+        await Future<void>.delayed(pastFrozen);
+
+        // Three sweeps, because "does not ring yet" and "does not ring" are
+        // different claims and only the second is the one that matters for a
+        // session somebody left open over lunch.
+        final watchdog = watchdogOver();
+        for (var i = 0; i < 3; i++) {
+          await watchdog.sweepOnce();
+        }
+        expect(bell.rings, isEmpty);
+        expect(journal.last!.why, contains('were live or ended'));
+      },
+    );
+
+    test('a live foreign subagent is blind, not rung about', () async {
+      final process = await writer('foreign-subagent');
+      fold([
+        payload(
+          'B/1788280992.087510-SessionStart.stdin.json',
+          transcript: transcriptPath('foreign-subagent'),
+        ),
+        payload(
+          'B/1788280995.970887-SubagentStart.stdin.json',
+          transcript: transcriptPath('foreign-subagent'),
+        ),
+      ], pid: process.pid);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      final sweep = await watchdogOver().sweepOnce();
+      final childId = HookProjection.subagentNodeId(
+        foreignSession,
+        childAgentId,
+      );
+
+      expect(bell.rings, isEmpty, reason: 'a subagent is not a process');
+      expect(sweep.blind.map((b) => b.nodeId), [childId]);
+      // Not rung, and not counted healthy either: it reaches the board, in
+      // the `blind` list rather than the `stalled` one.
+      final frame = watchdogFrameFor(
+        sweep,
+        at: SproutInstance.forFeed(
+          databasePath: store.databasePath,
+          firstEvent: store.firstEvent,
+        ).cursorAt(0),
+      );
+      expect(frame.blind.single.nodeId, childId);
+      expect(frame.stalled, isEmpty);
+      expect(sweep.why, contains('could not be measured'));
+    });
+
+    test('a killed session rings to the cap and then stops, until the '
+        'watchdog is restarted', () async {
+      // The decision this leaf had to make, measured rather than assumed.
+      //
+      // A session killed mid-turn fires NO Stop and NO SessionEnd — probed
+      // with a real `kill -9`, which produced exactly SessionStart and
+      // UserPromptSubmit and then silence. So a closed terminal leaves a
+      // hook-observed root `working` forever with a dead pid, which is
+      // `abandoned`, which rings.
+      //
+      // What the cap does with it: an abandoned node has no `lastWrite`, so
+      // `RingLedger` has no mark to reset against and the count can only clear
+      // by the node ceasing to contradict — which it never will. It therefore
+      // rings exactly `cap` times and is silenced. It is NOT silenced for
+      // good: the ledger lives in the watchdog object, so a new `sprout ui`
+      // starts the count again. That is recorded as a finding, not suppressed
+      // here.
+      final dead = await Process.start('/bin/sh', ['-c', 'exit 0']);
+      await dead.exitCode;
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('foreign-killed'),
+        ),
+        payload(
+          'A/1788280943.696918-UserPromptSubmit.stdin.json',
+          transcript: transcriptPath('foreign-killed'),
+        ),
+      ], pid: dead.pid);
+      expect(
+        store.node(rootId)!.status,
+        NodeStatus.working,
+        reason: 'no ending was ever recorded, because none was ever sent',
+      );
+
+      final watchdog = watchdogOver(ringCap: 3);
+      for (var i = 0; i < 6; i++) {
+        await watchdog.sweepOnce();
+      }
+      expect(bell.rings.map((r) => r.consecutiveRings), [1, 2, 3]);
+      expect(bell.rings.first.liveness, Liveness.abandoned);
+      expect(bell.rings.first.because, contains('no process holds pid'));
+      expect(watchdog.ledger.isSilenced(rootId), isTrue);
+      expect(journal.last!.silenced, hasLength(1));
+
+      // A second watchdog over the same store — which is what a restarted
+      // `sprout ui` is — rings about it again from one.
+      final second = RecordingBell();
+      final restarted = watchdogOver(ringCap: 3, onto: second);
+      await restarted.sweepOnce();
+      expect(
+        second.rings.single.consecutiveRings,
+        1,
+        reason: 'the cap is per watchdog process, not durable — see F-20',
+      );
+    });
+
+    test('runner-spawned nodes are unaffected in the same sweep', () async {
+      // The two paths share one measurement and one store, so the honest test
+      // of "nothing changed for the runner" is a tree that holds both.
+      final busy = await writer('mixed-runner');
+      record('mixed-runner', pid: busy.pid);
+      final foreign = await writer('mixed-foreign');
+      fold([
+        payload(
+          'A/1788280943.420722-SessionStart.stdin.json',
+          transcript: transcriptPath('mixed-foreign'),
+        ),
+      ], pid: foreign.pid);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      final sweep = await watchdogOver().sweepOnce();
+      expect(bell.rings, isEmpty);
+      expect(sweep.nodesSwept, 2);
+      expect(sweep.blind, isEmpty);
     });
   });
 

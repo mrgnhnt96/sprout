@@ -53,15 +53,25 @@ environment:
 #    `package:sproutd/protocol.dart`, which means they check the re-export
 #    shims keep working for the daemon at the same time.
 #  - the commands that decide whether a change is good in this repo are
-#    `.showrunner/config.json` -> checks and `.game_loop/verify.yaml`, and both
-#    of them today name only sproutd and sprout_ui. A suite moved here would
-#    have left the gate, which is the one thing worth more than tidy layout.
+#    `.showrunner/config.json` -> checks and `.game_loop/verify.yaml`, and
+#    neither ran a suite from this directory. A suite moved here would have
+#    left the gate, which is the one thing worth more than tidy layout.
+#    (`.showrunner/config.json` still names sproutd only; `verify.yaml` has
+#    since grown the rule described below.)
 #
-# **`.game_loop/verify.yaml` still owes this package a rule** — that file is
-# write-guarded and was not this leaf's to edit. Until one lands, a change
-# confined to `sprout_protocol/**` is UNCHECKED: measured, `cd sproutd &&
-# dart analyze --fatal-infos` does not analyze these sources, and neither does
-# sprout_ui's. The rule this package wants is in P3-05's close reason.
+# **`.game_loop/verify.yaml` carries the rule this package needs**, and it is the
+# strictest in the repo: a change confined to `sprout_protocol/**` owes four
+# commands — this package's own format and analyze, plus `cd sproutd && dart
+# test` and `cd sprout_ui && dart test`. The consumers are the load-bearing
+# half, for the reason above: measured, `cd sproutd && dart analyze
+# --fatal-infos` does not analyze these sources and neither does sprout_ui's,
+# so only the consumers' suites, which compile this package, can see a change
+# here at all. That is why the rule has to exist, and it is why the paragraph
+# it replaced — written before the rule landed, and saying a change here was
+# UNCHECKED — was worth correcting rather than deleting: a comment that
+# understates coverage is read as permission. (That was F-13 in
+# `docs/02-open-findings.md` — a different F-13 from the `pages` /
+# `worthSurfacing` naming one P6-03 settled, which reuses the same number.)
 
 dev_dependencies:
   lints: ^6.0.0

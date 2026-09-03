@@ -1,0 +1,85 @@
+F-22: the checks integrate does NOT re-run, on the MERGED result at 900316c
+
+$ cd sprout_protocol && dart format --output=none --set-exit-if-changed .
+Formatted 13 files (0 changed) in 0.02 seconds.
+exit=0
+
+$ cd sprout_protocol && dart analyze --fatal-infos --fatal-warnings
+Analyzing sprout_protocol...
+No issues found!
+exit=0
+
+$ cd sprout_ui && dart test    # the only check that catches a web-unsafe change
+00:00 +0: loading test/board_test.dart
+00:00 +0: test/payload_test.dart: (setUpAll)
+00:00 +1: test/payload_test.dart: (setUpAll)
+00:00 +2: test/payload_test.dart: (setUpAll)
+00:00 +3: test/payload_test.dart: (setUpAll)
+00:00 +4: test/payload_test.dart: (setUpAll)
+00:00 +5: test/payload_test.dart: (setUpAll)
+00:00 +6: test/payload_test.dart: (setUpAll)
+00:00 +7: test/payload_test.dart: (setUpAll)
+00:00 +8: test/payload_test.dart: (setUpAll)
+00:00 +9: test/payload_test.dart: (setUpAll)
+00:00 +10: test/payload_test.dart: (setUpAll)
+00:00 +11: test/payload_test.dart: (setUpAll)
+00:00 +12: test/payload_test.dart: (setUpAll)
+00:00 +13: test/payload_test.dart: (setUpAll)
+00:00 +14: test/payload_test.dart: (setUpAll)
+00:00 +15: test/payload_test.dart: (setUpAll)
+00:00 +16: test/payload_test.dart: (setUpAll)
+00:00 +17: test/payload_test.dart: (setUpAll)
+00:00 +18: test/payload_test.dart: (setUpAll)
+00:00 +19: test/payload_test.dart: (setUpAll)
+00:00 +20: test/payload_test.dart: (setUpAll)
+00:00 +21: test/payload_test.dart: (setUpAll)
+00:00 +22: test/payload_test.dart: (setUpAll)
+00:00 +23: test/payload_test.dart: (setUpAll)
+00:00 +24: test/payload_test.dart: (setUpAll)
+00:00 +25: test/payload_test.dart: (setUpAll)
+00:00 +26: test/payload_test.dart: (setUpAll)
+00:00 +27: test/payload_test.dart: (setUpAll)
+00:00 +28: test/payload_test.dart: (setUpAll)
+00:00 +29: test/payload_test.dart: (setUpAll)
+00:00 +30: test/payload_test.dart: (setUpAll)
+00:00 +31: test/payload_test.dart: (setUpAll)
+00:00 +32: test/payload_test.dart: (setUpAll)
+00:00 +33: test/payload_test.dart: (setUpAll)
+00:00 +34: test/payload_test.dart: (setUpAll)
+00:00 +35: test/payload_test.dart: (setUpAll)
+00:00 +36: test/payload_test.dart: (setUpAll)
+00:00 +37: test/payload_test.dart: (setUpAll)
+00:00 +38: test/payload_test.dart: (setUpAll)
+00:00 +39: test/payload_test.dart: (setUpAll)
+00:00 +40: test/payload_test.dart: (setUpAll)
+00:00 +41: test/payload_test.dart: (setUpAll)
+00:00 +42: test/payload_test.dart: (setUpAll)
+00:00 +43: test/payload_test.dart: (setUpAll)
+00:00 +44: test/payload_test.dart: (setUpAll)
+00:00 +45: test/payload_test.dart: (setUpAll)
+00:00 +46: test/payload_test.dart: (setUpAll)
+00:00 +47: test/payload_test.dart: (setUpAll)
+00:00 +48: test/payload_test.dart: (setUpAll)
+00:00 +49: test/payload_test.dart: (setUpAll)
+00:00 +50: test/payload_test.dart: (setUpAll)
+00:00 +51: test/payload_test.dart: (setUpAll)
+00:00 +52: test/payload_test.dart: (setUpAll)
+00:00 +53: test/payload_test.dart: (setUpAll)
+00:00 +54: test/payload_test.dart: (setUpAll)
+00:00 +55: test/payload_test.dart: (setUpAll)
+00:00 +56: test/payload_test.dart: (setUpAll)
+00:00 +57: test/payload_test.dart: (setUpAll)
+00:00 +58: test/payload_test.dart: (setUpAll)
+00:00 +59: test/payload_test.dart: (setUpAll)
+00:00 +60: test/payload_test.dart: (setUpAll)
+00:00 +61: test/payload_test.dart: (setUpAll)
+00:09 +61: test/payload_test.dart: build_web_compilers did not skip the entrypoint
+00:09 +62: test/payload_test.dart: the build emits the client bundle, and it is not empty
+00:09 +63: test/payload_test.dart: the bundle is THIS app, not a stale or empty one
+00:09 +64: test/payload_test.dart: THE PROTOCOL IS IN THE BUNDLE, not merely on the import graph
+00:09 +65: test/payload_test.dart: the stylesheet is generated from the @css getters
+00:09 +66: test/payload_test.dart: index.html is copied through and still names the bundle
+00:09 +67: test/payload_test.dart: the payload is the three root files, and nothing under packages/
+00:09 +68: test/payload_test.dart: (tearDownAll)
+00:09 +68: All tests passed!
+exit=0

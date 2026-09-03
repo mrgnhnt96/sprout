@@ -1,76 +1,48 @@
-# sprout Phase 4 — REAL-USAGE PROOF on trunk
+# sprout Phase 4 — does it actually work? Proved by real usage.
 
-Not the test suite, and not a branch. A **compiled** `sprout` from trunk, a throwaway `git init`
-repository, and **real `claude -p` sessions that really ran and really wrote files**.
+Not the test suite, not a branch. One **compiled** `sprout` from trunk, one throwaway `git init`
+repository, and **real `claude -p` sessions that ran and wrote files**.
 
-The developer's bar, in their words: *"If you don't think that this works, then we aren't done.
+The bar, in the developer's words: *"If you don't think that this works, then we aren't done.
 You'll need to test this to make sure that it works. Both via tests and real usage."*
 
-  binary : dart compile exe sproutd/bin/sprout.dart   (trunk, with P4-07 merged)
-  repo   : a fresh `git init` with one commit and `.worktrees/` ignored
-  model  : claude-opus-5[1m], real sessions, real cost
+Every run below is from a single sequence against one repository and one store, with the trunk
+binary that carries P4-03 … P4-09. Reproducible: compile, `git init`, run the four commands.
+
+    binary : dart compile exe sproutd/bin/sprout.dart
+    model  : claude-opus-5[1m], real sessions, real cost
+    suite  : sproutd 632 passing · sprout_ui 71 passing · sprout_protocol clean
 
 ---
 
-## 1. `sprout delegate` — a real depth-2 delegation
+## 1. A real delegation — floor, waves, worktrees, acceptance
 
-The plan, in full:
+The plan (abridged; the full file is in this document's history):
 
-{
-  "parent_id": "trunk-real-delegation",
-  "task": "add two small text files that agree on the same greeting word",
-  "mode": {
-    "declared": {
-      "mode": "build",
-      "reason": "both files must use the identical greeting, so the decision is shared"
-    }
-  },
-  "shared_decisions": [
-    "the greeting word is exactly: bonjour",
-    "no trailing punctuation"
-  ],
-  "children": [
-    {
-      "id": "alpha",
-      "task": "Create a file named alpha.txt in the current directory whose only contents are the agreed greeting word. Then stop.",
-      "files": {"paths": ["alpha.txt"]},
-      "success_conditions": [
-        {"command": ["sh", "-c", "grep -qx bonjour alpha.txt"]}
-      ]
-    },
-    {
-      "id": "beta",
-      "task": "Create a file named beta.txt in the current directory whose only contents are the agreed greeting word. Then stop.",
-      "files": {"paths": ["beta.txt"]},
-      "success_conditions": [
-        {"command": ["sh", "-c", "grep -qx NOT_THE_WORD beta.txt"]}
-      ]
-    }
-  ]
-}
+  mode        : build — "both files must use the identical greeting, so the decision is shared"
+  decisions   : "the greeting word is exactly: bonjour", "no trailing punctuation"
+  child alpha : write alpha.txt   · success: grep -qx bonjour alpha.txt      (will PASS)
+  child beta  : write beta.txt    · success: grep -qx NOT_THE_WORD beta.txt  (will FAIL)
 
-**The load-bearing detail:** the word `bonjour` appears **only** in `shared_decisions`. Neither
-child's own `task` contains it. If both children write `bonjour`, then `Decomposition.briefFor`
-really did push the parent's shared decision down into a live model — which is the `build` half of
-docs/01-plan.md §2.3 having an observable consequence rather than being a field nobody reads.
+**The load-bearing detail:** `bonjour` appears only in `shared_decisions`. It is in neither child's
+own task. If both children write it, `Decomposition.briefFor` really pushed the parent's decision
+into a live model — §2.3's `build` mode having an observable consequence, not being a field.
 
-### What ran
-
-tree $0.0000 over 0 nodes
 delegate trunk-real-delegation
 2 children in 1 wave (max width 2)
   mode build: both files must use the identical greeting, so the decision is shared
   wave 0: alpha, beta
-node mtl3agt7-38bf008a (the delegation)
+node mtl4w0d6-e1f67946 (the delegation)
 wave 0: 2 child(ren)
-[alpha] node mtl3agt7-9cbf6a44  pid 15696  /private/tmp/sprout-delegate-ZNCH9G/.worktrees/sprout-mtl3agt7-9cbf6a44
-[beta] node mtl3agv1-e27b96b5  pid 15704  /private/tmp/sprout-delegate-ZNCH9G/.worktrees/sprout-mtl3agv1-e27b96b5
-[alpha] session 1900a5ea-2364-49b0-8930-eddef3a529ae  model claude-opus-5[1m]
-[beta] session 172d5004-a63c-4159-8934-1e8fca6a39b7  model claude-opus-5[1m]
+[alpha] node mtl4w0d7-5af16546  pid 10613  /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4w0d7-5af16546
+[beta] node mtl4w0fb-df90df66  pid 10622  /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4w0fb-df90df66
+[alpha] session 041377d4-4a1f-4143-90dd-a22ad7db7440  model claude-opus-5[1m]
+[beta] session eb7dc207-95fb-4a41-816a-d57d863715c4  model claude-opus-5[1m]
 [alpha] I'll create the file with the agreed greeting word.
 [alpha] Created `alpha.txt` in the worktree root containing exactly `bonjour` (with a trailing newline, no punctuation). Stopping here as instructed.
-[alpha] acceptance accepted mtl3agt7-9cbf6a44: 1 condition(s) passed; the child answered and its subtree had drained
-[beta] Created `beta.txt` in the worktree root containing exactly `bonjour` (single line, trailing newline, no punctuation). Stopping here.
+[alpha] acceptance accepted mtl4w0d7-5af16546: 1 condition(s) passed; the child answered and its subtree had drained
+
+[beta] Created `beta.txt` in the worktree containing exactly `bonjour` (single line, trailing newline, no punctuation). Stopping here as instructed.
 result
   accepted    1  alpha
   rejected    1  beta (conditionFailed)
@@ -81,40 +53,56 @@ result
 
 ### stderr
 
-sprout: [alpha] worktree kept /private/tmp/sprout-delegate-ZNCH9G/.worktrees/sprout-mtl3agt7-9cbf6a44 (uncommittedChanges): /private/tmp/sprout-delegate-ZNCH9G/.worktrees/sprout-mtl3agt7-9cbf6a44 holds 0 changed and 1 untracked file(s). Removing it would destroy them, and they may be the only copy.
-sprout: [beta] acceptance rejected mtl3agv1-e27b96b5 (conditionFailed): sh -c grep -qx NOT_THE_WORD beta.txt exited 1
-sprout: [beta] worktree kept, not accepted — /private/tmp/sprout-delegate-ZNCH9G/.worktrees/sprout-mtl3agv1-e27b96b5
-
-### The tree it left in the store
-
-cursor s1.b0cff26de13ac662.122
-checkpointed · mtl3agt7-38bf008a · add two small text files that agree on the same greeting word · since 05:33Z (1m) · next NONE SCHEDULED · >=$0.4616 (1 unknown)
-  checkpointed · mtl3agt7-9cbf6a44 · Create a file named alpha.txt in the current directory whose only contents are the agreed greeting word. Then stop. This is one part of: add two small text files that agree on the same greeting word Decisions the parent has already made. Follow them; do not re-decide them: - the greeting word is exactly: bonjour - no trailing punctuation · since 05:33Z (1m) · next NONE SCHEDULED · $0.2223
-  checkpointed · mtl3agv1-e27b96b5 · Create a file named beta.txt in the current directory whose only contents are the agreed greeting word. Then stop. This is one part of: add two small text files that agree on the same greeting word Decisions the parent has already made. Follow them; do not re-decide them: - the greeting word is exactly: bonjour - no trailing punctuation · since 05:33Z (1m) · next NONE SCHEDULED · $0.2393
-holds nothing
-journal readable
-
-Two children under one delegation node, by `parent_id`. The parent's spend reads `>=` with an
-unknown count, which is F-23 being honest rather than guessing.
+sprout: [alpha] worktree kept /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4w0d7-5af16546 (uncommittedChanges): /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4w0d7-5af16546 holds 0 changed and 1 untracked file(s). Removing it would destroy them, and they may be the only copy.
+sprout: [beta] acceptance rejected mtl4w0fb-df90df66 (conditionFailed): sh -c grep -qx NOT_THE_WORD beta.txt exited 1
+sprout: [beta] worktree kept, not accepted — /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4w0fb-df90df66
 
 ### What the children actually wrote
 
-$ cat alpha.txt
-bonjour
-$ cat beta.txt
-bonjour
+    alpha.txt   bonjour
+    beta.txt    bonjour
 
 Both wrote `bonjour`. The shared decision reached both real models through the brief.
 
-`alpha` passed its condition and was accepted — and its worktree was **still kept**, because it
-held an untracked file. Acceptance is not authorization to destroy. `beta` wrote a perfectly good
-file and was **rejected**, because its success condition genuinely failed. Note that `beta`'s
-session exited 0 and reported success: the deterministic verifier overruled the model's own
-self-report, which is exactly what §2.4 argues for.
+Three things happened here that are the whole point of Phase 4:
+
+- **`alpha` passed and was accepted — and its worktree was still KEPT**, because it held an
+  untracked file. Acceptance is not authorization to destroy.
+- **`beta` exited 0 and reported success, and was REJECTED**, because its success condition
+  genuinely failed. The deterministic verifier overruled the model's own self-report, which is
+  what §2.4 argues for and what an LLM critic would have got wrong.
+- Both children ran **concurrently, in separate git worktrees**, under one delegation node.
 
 ---
 
-## 2. The delegation floor — refusing to decompose, for real
+## 2. Depth — a four-level tree, then the cap refusing
+
+`sprout delegate --parent <alpha>` put two more real children a level down, both accepted. Then
+delegating under one of *those* is refused before anything is launched:
+
+[gamma] worktree removed /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4wwjb-4c4f420e and branch sprout/mtl4wwjb-4c4f420e
+[delta] worktree removed /private/tmp/sprout-canon-QHumvG/.worktrees/sprout-mtl4wwnq-d60212ce and branch sprout/mtl4wwnq-d60212ce
+  refused     2  gamma (depthCap), delta (depthCap)
+  worktrees   removed 2, kept 0
+
+sprout: [gamma] refused (depthCap) This child would sit at depth 5, past sprout's depth cap of 3. Delegation stops here; do the work in this session, or hand it back with what is still outstanding.
+sprout: [delta] refused (depthCap) This child would sit at depth 5, past sprout's depth cap of 3. Delegation stops here; do the work in this session, or hand it back with what is still outstanding.
+
+Exit **2**. No process started, and the rooms those children would have used are removed — a
+refusal leaks no directory, and the summary count agrees with the log (that agreement is P4-08;
+before it, this printed `removed 0` under two lines saying it had removed two).
+
+Afterwards the store holds **no stuck rows**:
+
+    checkpointed  7
+    unlaunched    2      <- refused, and correctly not counted as live
+
+Before P4-09 those two were `spawning` for ever and counted against `maxLiveNodes` (12) and
+`maxLiveChildren` (4). Twelve refusals and sprout refused *every* spawn tree-wide.
+
+---
+
+## 3. The delegation floor — refusing to decompose at all
 
 $ sprout delegate --plan <a plan with one child>
 delegate too-small-to-split: NOT DECOMPOSED
@@ -122,48 +110,47 @@ delegate too-small-to-split: NOT DECOMPOSED
   floor refusals {singleChild: 1, nothingEstimable: 0, noConcurrencyWon: 0}
   nothing was spawned
 
-Exit code **10**. Every refusal reason present in the tally even at zero (INV8's positive control),
-and the message names the remedy rather than just saying no. Verified afterwards: the store still
-held 3 nodes and no node carrying that task, and the repository still had exactly 2 worktrees —
-**nothing was created**. §3's "the cheapest performance win consists of *not* building a tree",
+Exit **10**. Every refusal reason present in the tally even at zero, the message names the remedy,
+and nothing was created. §3's *"the cheapest performance win consists of not building a tree"*,
 actually happening.
 
 ---
 
-## 3. `sprout run --worktree --accept-if` — the single-session path, also real
+## 4. The board, driven off the live socket
 
-Run before P4-07 landed, against trunk 34ae278, same method.
+`sprout ui`, then the board's own client — the same `FrameReader`, `LiveTree` and `App.lines` that
+compile into `main.client.dart.js` — against the real tree:
 
-sprout — REAL-USAGE PROOF on trunk 34ae278, compiled binary, real claude -p children
-Not the test suite. A throwaway git repo, a compiled sprout, and two sessions that really ran.
+    === FINAL BOARD ===
+    cursor s1.da6dc384959fcbb1.305
+    LIVE · heartbeat ?
+    WATCHDOG · 06:19Z · rang for 2 of 9 node(s): mtl4wwjb-4c4f420e abandoned, mtl4wwnq-d60212ce abandoned
+    checkpointed · mtl4w0d6-e1f67946 · add two small text files that agree on the same greeting word · since 06:18Z (1m) · n
+      checkpointed · mtl4w0d7-5af16546 · Create a file named alpha.txt in the current directory whose only contents are the 
+        checkpointed · mtl4wg06-2774785d · write two more tiny files, one level deeper · since 06:18Z (0m) · next NONE SCHED
+          checkpointed · mtl4wg0b-965f38af · Create a file named gamma.txt in the current directory containing exactly the w
+            checkpointed · mtl4wwj4-5e45197b · write two more tiny files, one level deeper · since 06:19Z (0m) · next NONE S
+              unlaunched · mtl4wwjb-4c4f420e · Create a file named gamma.txt in the current directory containing exactly the
+    STALLED · mtl4wwjb-4c4f420e · abandoned · no process was ever started: the containment gate refused the launch (This chi
+              unlaunched · mtl4wwnq-d60212ce · Create a file named delta.txt in the current directory containing exactly the
+    STALLED · mtl4wwnq-d60212ce · abandoned · no process was ever started: the containment gate refused the launch (This chi
+          checkpointed · mtl4wg28-28c4d63d · Create a file named delta.txt in the current directory containing exactly the w
+      checkpointed · mtl4w0fb-df90df66 · Create a file named beta.txt in the current directory whose only contents are the a
+    holds nothing
 
-  binary : dart compile exe bin/sprout.dart  (trunk 34ae278)
-  repo   : a fresh git init with one commit
-
-== RUN 1 — the condition PASSES ==
-$ sprout run --worktree --accept-if "test -f greeting.txt" "Create a file called greeting.txt ... containing exactly the word: hello."
-tree $0.0000 over 0 nodes
-worktree /private/tmp/sprout-demo-2Q03AW/.worktrees/sprout-mtl28pj1-e5f28f6e
-branch   sprout/mtl28pj1-e5f28f6e  from HEAD fc16b6fb6c03379417efca936a74faf92230d2b3
-node mtl28pj1-e5f28f6e  pid 64306
-log  /tmp/sprout-demo-2Q03AW/.sproutlogs/mtl28pj1-e5f28f6e.ndjson
-session d5d5d598-4249-4928-a1f3-2515829c33e3  model claude-opus-5[1m]
-Created `greeting.txt` containing `hello`.
-exit 0  result success  cost $0.3053  frames 108
-acceptance accepted mtl28pj1-e5f28f6e: 1 condition(s) passed; the child answered and its subtree had drained
-sprout: worktree kept /private/tmp/sprout-demo-2Q03AW/.worktrees/sprout-mtl28pj1-e5f28f6e (uncommittedChanges): /private/tmp/sprout-demo-2Q03AW/.worktrees/sprout-mtl28pj1-e5f28f6e holds 0 changed and 1 untracked file(s). Removing it would destroy them, and they may be the only copy.
-
-== RUN 2 — the condition FAILS ==
-$ sprout run --worktree --accept-if "test -f NEVER_CREATED.txt" "Create a file called other.txt containing the word world."
-exit 0  result success  cost $0.3118  frames 122
-sprout: acceptance rejected mtl29hci-f2d5684d (conditionFailed): test -f NEVER_CREATED.txt exited 1
-sprout: worktree kept, rejected mtl29hci-f2d5684d (conditionFailed): test -f NEVER_CREATED.txt exited 1 — /private/tmp/sprout-demo-2Q03AW/.worktrees/sprout-mtl29hci-f2d5684d
+Six levels indented by `parent_id`, `unlaunched` rendered, and **`holds nothing`** — the phantom
+"holds a worktree we deleted" lines are gone with P4-09.
 
 ---
 
 ## What this does NOT prove
 
-- **Depth 3.** Both proofs are depth 2. The cap is 3 and nothing here exercised a grandchild.
-- **A wave that is genuinely too wide.** Both real plans fit in one wave; F-26's half-refused wave
-  was reached only in the test suite.
-- **The board.** See the UI note recorded separately.
+- **No browser has painted the page.** This exercises the entire client except the paint. There is
+  no Chrome on this machine, and installing one or enabling `safaridriver` was not done unattended.
+- **The watchdog still rings an `unlaunched` node `abandoned`** — visible above. That is **F-32**,
+  a recorded choice rather than an oversight.
+- **A pre-P4-09 database keeps its stuck `spawning` rows.** That is **F-33**; the fix moves the row
+  at the moment of refusal and the feed is append-only.
+- **No wave was genuinely too wide** for the concurrency bound outside the test suite (F-26).
+- **The plan is written by a human, not produced by a model.** Deciding a decomposition is a later
+  phase; this proves sprout can execute one.

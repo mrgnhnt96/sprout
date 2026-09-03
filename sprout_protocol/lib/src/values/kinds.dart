@@ -321,3 +321,62 @@ const Map<String, String> hookKindsByEventName = {
 /// which this returns nothing.
 String hookKindForEventName(String? eventName) =>
     hookKindsByEventName[eventName] ?? hookUnknownKind;
+
+/// The prefix on every kind recording what sprout did to a **git worktree**.
+///
+/// Its own prefix rather than a `runner.*` kind, on [hookKindPrefix]'s
+/// argument: these rows are about the *room* a session works in, not about the
+/// session. The room outlives the process on purpose — the whole point of
+/// [worktreeKeptKind] is that a worktree survives the node that filled it — so
+/// a reader that took a `runner.*` row as "something happened to the process"
+/// would be wrong about every one of them.
+const String worktreeKindPrefix = 'worktree.';
+
+/// The event appended when a git worktree was created for a node.
+///
+/// The payload carries `path` and `branch` — where the session's files really
+/// are and the branch its commits land on — plus `base` and `base_sha`, the ref
+/// it was cut from and what that ref resolved to at the time. `base_sha` is the
+/// field a later teardown needs and the only one that cannot be recovered
+/// afterwards: the ref will have moved.
+///
+/// It also carries `repository`, the repository root. That is where the row
+/// records it, because the node's own `project` column holds the **worktree**
+/// path instead — the session's files are genuinely there, and a snapshot
+/// saying otherwise would be a lie about the filesystem that `heldResourcesOf`
+/// then reads as contention between a parent and its child.
+///
+/// **There is deliberately no `worktree.refused` kind.** A creation sprout
+/// declines — the path is taken, the branch is taken — happens before any node
+/// row exists, and `event.node_id` carries a foreign key onto `node (id)` with
+/// `PRAGMA foreign_keys=ON`. Such a row could not be inserted, so declaring a
+/// kind for it would be declaring wire vocabulary nothing can ever write. The
+/// refusal reaches the operator on stderr and through a distinct exit code.
+const String worktreeCreatedKind = '${worktreeKindPrefix}created';
+
+/// The event appended when a worktree was torn down and its files are gone.
+///
+/// Only ever written after sprout looked and found nothing to lose: a clean
+/// `git status --porcelain` — **untracked files included** — and no commit on
+/// the branch that the base does not already reach. The payload carries `path`,
+/// `branch`, and `branch_deleted`, since the branch is removed separately and
+/// only by `git branch -d`, which refuses on its own if it disagrees.
+const String worktreeRemovedKind = '${worktreeKindPrefix}removed';
+
+/// The event appended when sprout **refused** to tear a worktree down.
+///
+/// The kind that carries this area's whole point, and the one that fires most:
+/// a child session's entire job is to leave changes behind, so the safe
+/// teardown declines far more often than it succeeds. That is the correct shape
+/// and not a defect in it. From `docs/research/07-local-harnesses.md`: *"an
+/// abandoned worktree may hold the only copy of real work: surface it, do not
+/// silently reuse it and do not silently delete it."*
+///
+/// The payload carries `reason` — one of the wire strings on the teardown's
+/// keep-reason enum — an `explanation` a human can act on, and `evidence`: the
+/// counts that were measured, or the text of the look that failed.
+///
+/// **A look that failed keeps the worktree and says so.** An unreadable
+/// `git status` is not evidence of a clean tree, and folding the two together
+/// is how a check whose pass is silence deletes somebody's only copy (INV8).
+const String worktreeKeptKind = '${worktreeKindPrefix}kept';

@@ -46,6 +46,24 @@ cat "${_fixturePath(fixture)}"
   return script.path;
 }
 
+/// A `claude` stand-in that also leaves an untracked file in its cwd.
+///
+/// The ordinary case for a child session, and the one the safe teardown exists
+/// for: a file created and never `git add`ed is work, and a cleanliness check
+/// that looked only at tracked changes would delete it.
+String _fakeClaudeLeavingWork(Directory dir, String fixture) {
+  final script = File(p.join(dir.path, 'claude-worker'));
+  script.writeAsStringSync('''
+#!/bin/sh
+printf '%s\\n' "\$@" > "${dir.path}/argv.txt"
+echo launched >> "${dir.path}/launches.txt"
+echo "half-finished" > ./child-work.txt
+cat "${_fixturePath(fixture)}"
+''');
+  Process.runSync('chmod', ['+x', script.path]);
+  return script.path;
+}
+
 List<String> _argv(Directory dir) =>
     File(p.join(dir.path, 'argv.txt')).readAsLinesSync();
 
@@ -612,6 +630,237 @@ void main() {
         // cannot be told from having nothing to caveat (INV8).
         expect(out.toString(), contains('tree \$0.0237 over 1 nodes'));
         expect(out.toString(), isNot(contains('unknown')));
+      });
+    });
+
+    // P4-03. `--worktree` runs the session in a git worktree cut for its node
+    // and attempts the teardown when it ends. Every test here uses a REAL
+    // `git init` repository, because the safety property being proved is
+    // git's behaviour and a fake that refused would prove only that the fake
+    // refuses (INV8).
+    group('--worktree', () {
+      late String repo;
+
+      Future<void> git(List<String> arguments, {String? directory}) async {
+        final result = await Process.run(
+          'git',
+          arguments,
+          workingDirectory: directory ?? repo,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+      }
+
+      setUp(() async {
+        // Resolved, because git prints resolved paths back and `/tmp` is a
+        // symlink to `/private/tmp` on macOS. Comparing an unresolved path
+        // against what git reports fails on that platform alone.
+        repo = p.join(tmp.resolveSymbolicLinksSync(), 'repo');
+        Directory(repo).createSync();
+        await git(['init', '--initial-branch=main']);
+        await git(['config', 'user.email', 'test@example.com']);
+        await git(['config', 'user.name', 'sprout test']);
+        File(p.join(repo, 'README.md')).writeAsStringSync('hello\n');
+        await git(['add', 'README.md']);
+        await git(['commit', '-m', 'first']);
+      });
+
+      /// The database and logs live in `tmp`, OUTSIDE the repository, which is
+      /// load-bearing rather than tidy: raw session logs written inside the
+      /// worktree would show up as untracked files and make every teardown
+      /// refuse, for work that is sprout's own bookkeeping.
+      List<String> flags(String claude) => [
+        '--claude',
+        claude,
+        '--db',
+        db(),
+        '--logs',
+        logs(),
+        '-C',
+        repo,
+        '--worktree',
+      ];
+
+      test(
+        'runs the session in the worktree and tears it down after',
+        () async {
+          final code = await run([
+            'say hi',
+            ...flags(_fakeClaude(tmp, 'A.ndjson')),
+          ]);
+          expect(code, cli.exitOk, reason: err.toString());
+
+          final store = open();
+          addTearDown(store.close);
+          final node = store.tree().single.node;
+          final events = store.eventsSince(0);
+
+          final created = events.firstWhere(
+            (e) => e.kind == 'worktree.created',
+          );
+          final path = created.payload['path']! as String;
+          expect(path, p.join(repo, '.worktrees', 'sprout-${node.id}'));
+          expect(created.payload['branch'], 'sprout/${node.id}');
+          expect(created.payload['repository'], repo);
+          expect(created.payload['base_sha'], isA<String>());
+
+          // The node's `project` is the worktree, not `-C`. That is the
+          // decision this leaf had to take, and it is asserted rather than
+          // described: a snapshot naming a directory the session is not in is a
+          // lie about the filesystem, and `heldResourcesOf` derives the one
+          // single-consumer resource sprout can observe straight from this
+          // column.
+          expect(node.project, path);
+
+          // The process really ran there. Read off the feed rather than off the
+          // stand-in, because `launch.working_directory` is what
+          // `Process.start` was actually given.
+          final spawned = events.firstWhere((e) => e.kind == 'runner.spawned');
+          final launch = spawned.payload['launch']! as Map<String, Object?>;
+          expect(launch['working_directory'], path);
+
+          // Nothing was left in it, so the teardown really removed it — and the
+          // removal is asserted on the directory, not only on the event.
+          final removed = events.firstWhere(
+            (e) => e.kind == 'worktree.removed',
+          );
+          expect(removed.payload['branch_deleted'], isTrue);
+          expect(Directory(path).existsSync(), isFalse);
+          expect(events.map((e) => e.kind), isNot(contains('worktree.kept')));
+        },
+      );
+
+      test('REFUSES the teardown when the session left work, and the file '
+          'is still there', () async {
+        final code = await run([
+          'do some work',
+          ...flags(_fakeClaudeLeavingWork(tmp, 'A.ndjson')),
+        ]);
+        expect(code, cli.exitOk, reason: err.toString());
+
+        final store = open();
+        addTearDown(store.close);
+        final events = store.eventsSince(0);
+        final created = events.firstWhere((e) => e.kind == 'worktree.created');
+        final path = created.payload['path']! as String;
+
+        final kept = events.firstWhere((e) => e.kind == 'worktree.kept');
+        expect(kept.payload['reason'], 'uncommittedChanges');
+        expect(
+          (kept.payload['evidence']! as Map)['untracked_files'],
+          1,
+          reason: 'the child never ran git add, and that is the normal case',
+        );
+
+        // The assertion the leaf exists for.
+        expect(Directory(path).existsSync(), isTrue);
+        expect(
+          File(p.join(path, 'child-work.txt')).readAsStringSync(),
+          'half-finished\n',
+        );
+        // And the human is told, on stderr, with somewhere to go and look.
+        expect(err.toString(), contains('kept $path'));
+        expect(events.map((e) => e.kind), isNot(contains('worktree.removed')));
+      });
+
+      test(
+        'reports a git that could not make one, and launches nothing',
+        () async {
+          // The node id is minted inside the CLI, so the path and the branch
+          // cannot be squatted by name from out here — `worktree_test.dart`
+          // covers both of those refusals directly. What this reaches is the
+          // other arm: `.worktrees` as a regular FILE, which git cannot create
+          // anything under. It is also the case that used to escape as an
+          // unhandled `FileSystemException`, before `create` stopped making the
+          // directory itself.
+          File(p.join(repo, '.worktrees')).writeAsStringSync('not a directory');
+
+          final launchesBefore = _launches(tmp);
+          final code = await run([
+            'say hi',
+            ...flags(_fakeClaude(tmp, 'A.ndjson')),
+          ]);
+
+          expect(code, cli.exitWorktreeFailed);
+          expect(err.toString(), contains('git could not make a worktree'));
+          expect(_launches(tmp), launchesBefore, reason: 'nothing was started');
+          expect(File(db()).existsSync(), isTrue);
+          final store = open();
+          addTearDown(store.close);
+          expect(store.tree(), isEmpty, reason: 'and no node row was written');
+        },
+      );
+
+      test(
+        'refuses outside a git repository rather than guessing a root',
+        () async {
+          final notARepo = Directory(p.join(tmp.path, 'plain'))..createSync();
+          final code = await run([
+            'say hi',
+            '--claude',
+            _fakeClaude(tmp, 'A.ndjson'),
+            '--db',
+            db(),
+            '--logs',
+            logs(),
+            '-C',
+            notARepo.path,
+            '--worktree',
+          ]);
+          expect(code, cli.exitUsage);
+          expect(err.toString(), contains('needs a git repository'));
+        },
+      );
+
+      test('a refused spawn does not leak the worktree it was given', () async {
+        // The cost of creating the worktree BEFORE the gate is asked, paid
+        // back. The order is forced — see `_run` — so what has to be true is
+        // that a refusal leaves nothing behind, and it can be, because a
+        // spawn that started no process left an empty tree.
+        final fake = _fakeClaude(tmp, 'A.ndjson');
+        var parent = '';
+        for (final depth in [0, 1, 2, 3]) {
+          final before = SproutStore.open(path: db());
+          final ids = {for (final n in before.tree()) n.node.id};
+          before.close();
+          final code = await run([
+            'depth $depth',
+            '--claude',
+            fake,
+            '--db',
+            db(),
+            '--logs',
+            logs(),
+            '-C',
+            repo,
+            if (depth > 0) ...['--parent', parent],
+          ]);
+          expect(code, cli.exitOk, reason: err.toString());
+          final after = SproutStore.open(path: db());
+          parent = after
+              .tree()
+              .where((n) => !ids.contains(n.node.id))
+              .single
+              .node
+              .id;
+          after.close();
+        }
+
+        final code = await run(['depth 4', ...flags(fake), '--parent', parent]);
+        expect(code, cli.exitRefused);
+        expect(err.toString(), contains('refused (depthCap)'));
+
+        final store = open();
+        addTearDown(store.close);
+        final events = store.eventsSince(0);
+        final created = events.lastWhere((e) => e.kind == 'worktree.created');
+        final path = created.payload['path']! as String;
+        expect(
+          events.where((e) => e.kind == 'worktree.removed'),
+          hasLength(1),
+          reason: 'the refused spawn is the only one that made a worktree',
+        );
+        expect(Directory(path).existsSync(), isFalse);
+        expect(Directory(p.join(repo, '.worktrees')).listSync(), isEmpty);
       });
     });
 

@@ -6,6 +6,7 @@ import 'package:sproutd/protocol.dart';
 import 'package:sproutd/runner.dart';
 import 'package:sproutd/snapshot.dart';
 import 'package:sproutd/store.dart';
+import 'package:sproutd/worktree.dart';
 import 'package:test/test.dart';
 
 /// A well-formed instance id that is not the one under test.
@@ -1045,6 +1046,62 @@ void main() {
       // this declaration, so a third producer has one place to register and a
       // rename is a compile error rather than something a test has to notice.
       expect(spawnRecordKinds, {runnerSpawnedKind, observedProcessKind});
+    });
+  });
+
+  group('and so are the worktree event kinds', () {
+    // P4-03. These three are in the `kind` column of a row that travels over
+    // the socket exactly as the others do, so they are declared once in
+    // `package:sprout_protocol` and pinned here, not spelled at the call site
+    // in `bin/sprout.dart`. That was F-11 and F-12, each of which cost a leaf.
+
+    test('the three keep their spelling', () {
+      // Everything `nodeObservedKind`'s doc says about renaming applies: the
+      // feed is append-only by schema trigger, so a row already written can
+      // never be rewritten to a new spelling.
+      expect(worktreeCreatedKind, 'worktree.created');
+      expect(worktreeRemovedKind, 'worktree.removed');
+      expect(worktreeKeptKind, 'worktree.kept');
+      expect(worktreeKindPrefix, 'worktree.');
+    });
+
+    test('removed and kept are two kinds, not one with a flag', () {
+      // The distinction the area exists to make. A single `worktree.torn_down`
+      // carrying `removed: true|false` would let a consumer that forgot the
+      // field read every refusal as a deletion, which is the one direction the
+      // mistake must not go.
+      expect(worktreeRemovedKind, isNot(worktreeKeptKind));
+    });
+
+    test('all three carry the prefix and none is another path\'s kind', () {
+      final worktreeKinds = {
+        worktreeCreatedKind,
+        worktreeRemovedKind,
+        worktreeKeptKind,
+      };
+      expect(worktreeKinds, hasLength(3));
+      for (final kind in worktreeKinds) {
+        expect(kind, startsWith(worktreeKindPrefix));
+        expect(kind, isNot(startsWith(hookKindPrefix)));
+        expect(kind, isNot(startsWith(frameKindPrefix)));
+        expect(kind, isNot(startsWith('runner.')));
+      }
+      expect(
+        worktreeKinds.intersection({
+          ...hookKindsByEventName.values,
+          hookUnknownKind,
+          hookMalformedKind,
+          observedProcessKind,
+          nodeObservedKind,
+          nodeUpdatedKind,
+          runnerSpawnedKind,
+          runnerRefusedKind,
+          runnerLaunchFailedKind,
+          runnerSessionKind,
+          runnerExitedKind,
+        }),
+        isEmpty,
+      );
     });
   });
 }

@@ -358,6 +358,42 @@ a line in a projection.
 
 ---
 
+### F-33 — P4-09's fix does not reach rows an older sprout already wrote, so an upgraded database keeps its stuck slots
+
+**Status: OPEN.** Observed on the merged trunk while re-proving P4-09, in the same throwaway
+database the bug was originally found in.
+
+P4-09 gave a never-started node `NodeStatus.unlaunched`, so a refused spawn stops counting against
+`SpendLedger.liveNodes` and `liveChildrenOf`. It moves the row **at the moment of the refusal**,
+which is the right place — the row and the feed cannot drift. But it is only reached by refusals
+that happen *after* the upgrade. Rows a pre-P4-09 binary already left at `spawning` stay there:
+
+```
+$ sqlite3 .sprout.db "SELECT status, count(*) FROM node GROUP BY status"
+checkpointed|8
+spawning|2        <- refused by the OLD binary, still holding a slot
+unlaunched|2      <- refused by the NEW binary, correctly released
+```
+
+Both `spawning` rows are refusals that no process ever backed, and both still count toward the
+bounds. So a developer who hit the depth cap a few times before upgrading carries those slots
+forward for ever, and the denial of service P4-09 repaired is still latent in their store — with
+nothing in the UI distinguishing those two rows from a session that is genuinely starting right now.
+
+**Why it was not repaired here.** The obvious fix is a migration that rewrites `spawning` rows to
+`unlaunched`, and it cannot be written honestly: `spawning` is a legitimate live status, so a
+migration cannot tell a stale refusal from a session that was mid-launch when the daemon was
+restarted, and rewriting the second kind would be worse than leaving the first. Distinguishing them
+means reading the feed for a `runner.refused` or `runner.launch_failed` event against that node with
+no `runner.spawned` — which is derivable, and is a real piece of work with its own correctness
+argument rather than a line in `migrations`.
+
+This is the same family as **F-24** and **F-17**: who is allowed to reconcile a row against
+evidence gathered after the fact. It is recorded here rather than taken inside a leaf that owned the
+refusal path and not the repair of history.
+
+---
+
 ### F-32 — A refused spawn is not an "ended" status, so the watchdog rings `abandoned` about it for ever
 
 **Status: OPEN.** Found by P4-09, which added the status the question is about, and deliberately

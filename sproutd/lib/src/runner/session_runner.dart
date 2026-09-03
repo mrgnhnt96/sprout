@@ -18,24 +18,55 @@ import 'raw_log.dart';
 
 part 'outcome.dart';
 
-/// The `--max-budget-usd` a root session is launched with under [policy].
+/// The `--max-budget-usd` a session under [parentId] is launched with.
 ///
-/// The tighter of the two ceilings a root sits under: its own subtree's, and
-/// whatever the run has left after what [ledger] has already spent. Never
-/// negative — a run already past its ceiling is refused by the gate before
-/// this is computed, so a negative here would be a bug, and clamping keeps the
-/// flag parseable if one ever slips through.
-double rootBudgetUsd(ContainmentPolicy policy, SpendLedger ledger) {
-  final runRemaining = max(0.0, policy.runBudgetUsd - ledger.totalCostUsd);
-  return min(policy.subtreeBudgetUsd, runRemaining);
+/// The tightest ceiling the new node sits under: whatever the run has left
+/// after what [ledger] has already spent, and — for every ancestor above it —
+/// whatever that ancestor's subtree ceiling has left. A root has no ancestors,
+/// so it gets the tighter of the subtree ceiling and the run's remainder,
+/// which is what this computed before P4-02 gave a spawn a parent.
+///
+/// The ancestor half is the part that only exists once spawns are parented,
+/// and leaving it out would have been a hole this leaf opened: a child handed
+/// the full subtree ceiling could spend it again beneath a parent that had
+/// already spent most of it, and `--max-budget-usd` would have permitted
+/// exactly the runaway the ceiling exists to bound.
+///
+/// **This is an upper bound on what is left, not a measurement of it.** The
+/// spend it subtracts is a floor whenever a node in the tree reported no
+/// dollar figure — see `ObservedLedger`, and INV7 — so the remainder it
+/// returns can only be too generous, never too tight.
+///
+/// Never negative: a run or a subtree already past its ceiling is refused by
+/// the gate before this is computed, so a negative here would be a bug, and
+/// clamping keeps the flag parseable if one ever slips through.
+double spawnBudgetUsd(
+  ContainmentPolicy policy,
+  SpendLedger ledger, {
+  String? parentId,
+}) {
+  var remaining = max(0.0, policy.runBudgetUsd - ledger.totalCostUsd);
+  remaining = min(policy.subtreeBudgetUsd, remaining);
+  if (parentId == null) return remaining;
+  for (final ancestorId in ledger.ancestryOf(parentId)) {
+    final ancestorRemaining = max(
+      0.0,
+      policy.subtreeBudgetUsd - ledger.subtreeCostUsd(ancestorId),
+    );
+    remaining = min(remaining, ancestorRemaining);
+  }
+  return remaining;
 }
 
-/// Spawns `claude -p` sessions at depth 0, streams each one to disk and into
-/// the store, and reports how it ended.
+/// Spawns `claude -p` sessions, streams each one to disk and into the store,
+/// and reports how it ended.
 ///
-/// Phase 1 spawns exactly one root per call and no children: delegation is
-/// Phase 4. The containment check runs anyway, before every launch, because
-/// a cap added later is a cap that was absent when it mattered (INV14).
+/// One session per call, at whatever depth its `SessionRequest.parentId` puts
+/// it. Before P4-02 that was always depth 0 over an empty ledger, so the
+/// containment check ran on every launch and could not refuse any of them; it
+/// ran anyway, because a cap added later is a cap that was absent when it
+/// mattered (INV14). Deciding a *tree* of them — decomposition, waves, a
+/// worktree per child — is still the rest of Phase 4.
 final class SessionRunner {
   /// Creates a runner writing to [store] and [logDirectory].
   ///
@@ -96,8 +127,16 @@ final class SessionRunner {
   /// a node too — sprout's own refusals must be counted (INV14), and a count
   /// held only in memory dies with the daemon.
   ///
-  /// [ledger] is the tree as it stands; it defaults to empty, which is what
-  /// the first root of a run is decided over.
+  /// [ledger] is the tree as it stands, and it is what every bound is judged
+  /// against: `readLedger` in `lib/snapshot.dart` builds one from a store. It
+  /// defaults to empty, which is what the very first root of a run is decided
+  /// over and **only** that — an empty ledger clears the depth cap, the
+  /// budgets and the concurrency bounds by construction, so passing none for a
+  /// spawn that has a tree above it is a gate that cannot say no (INV8).
+  ///
+  /// Throws [ArgumentError] before writing anything if
+  /// [SessionRequest.parentId] names a node [ledger] does not hold. See that
+  /// field, and `ContainmentPolicy.decide`, for why that is not a refusal.
   ///
   /// Throws whatever the launcher throws if the process cannot be started —
   /// typically a `ProcessException` because `claude` is not on `PATH` — after
@@ -108,6 +147,22 @@ final class SessionRunner {
   }) async {
     final nodeId = request.nodeId ?? _mintNodeId();
     final tree = ledger ?? SpendLedger.empty();
+    final parentId = request.parentId;
+    // `ContainmentPolicy.decide` makes this same check and throws rather than
+    // refusing, deliberately: an unknown parent has an unknown depth, so no
+    // spawn beneath it can be bounded at all, and treating it as a fragment
+    // root would hand a node that might be at depth 7 a fresh three levels.
+    // It is repeated *here* only to move it earlier than the node write below
+    // — a launch that nobody could decide must leave no node behind, and it is
+    // not a refusal, so there is no reason to count it under.
+    if (parentId != null && !tree.contains(parentId)) {
+      throw ArgumentError.value(
+        parentId,
+        'request.parentId',
+        'not in the ledger, so its depth is unknown and no spawn beneath it '
+            'can be bounded',
+      );
+    }
     final now = _clock();
 
     // `putNode` announces the row on the feed in the same call, so this is
@@ -117,6 +172,11 @@ final class SessionRunner {
     store.putNode(
       SproutNode(
         id: nodeId,
+        // Written onto the row, not only handed to the gate: the next
+        // decision is taken over a ledger read back out of the store, so a
+        // parent that lived only in the request would give this child a
+        // correct depth and its own children a wrong one.
+        parentId: parentId,
         project: request.project,
         status: NodeStatus.spawning,
         currentTask: request.task,
@@ -126,7 +186,11 @@ final class SessionRunner {
     );
 
     final decision = gate.admit(
-      SpawnRequest(ledger: tree, estimatedCostUsd: request.estimatedCostUsd),
+      SpawnRequest(
+        ledger: tree,
+        parentId: parentId,
+        estimatedCostUsd: request.estimatedCostUsd,
+      ),
     );
     final SpawnPermit permit;
     switch (decision) {
@@ -149,7 +213,7 @@ final class SessionRunner {
     final launch = SessionLaunch.claude(
       task: request.task,
       project: request.project,
-      maxBudgetUsd: rootBudgetUsd(gate.policy, tree),
+      maxBudgetUsd: spawnBudgetUsd(gate.policy, tree, parentId: parentId),
       executable: executable,
       environment: request.environment,
     );

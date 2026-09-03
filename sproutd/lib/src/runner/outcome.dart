@@ -1,12 +1,14 @@
 part of 'session_runner.dart';
 
-/// What to run, and where.
+/// What to run, where, and under whom.
 final class SessionRequest {
-  /// Describes one root session.
+  /// Describes one session: a root when [parentId] is null, a child when it
+  /// is not.
   const SessionRequest({
     required this.task,
     required this.project,
     this.nodeId,
+    this.parentId,
     this.estimatedCostUsd = 0,
     this.environment = const {},
   });
@@ -19,6 +21,27 @@ final class SessionRequest {
 
   /// sprout's id for the node. Minted if null; tests pass one.
   final String? nodeId;
+
+  /// The node this session is being spawned *under*, or null for a root.
+  ///
+  /// This is what makes the containment gate mean anything.
+  /// `ContainmentPolicy.decide` computes the child's depth as
+  /// `ledger.depthOf(parentId)! + 1` and charges its estimate against every
+  /// ancestor's subtree ceiling, so with this null — as it was for every spawn
+  /// before P4-02, because the field did not exist — every request is depth 0
+  /// over an empty tree and every bound is cleared by construction.
+  ///
+  /// It is written onto the node row as well as handed to the gate, so the
+  /// tree the *next* decision is taken over contains this spawn. A parent
+  /// recorded only in the request would give the child a correct depth once
+  /// and its own children a wrong one.
+  ///
+  /// **Must name a node the ledger already holds.** `SessionRunner.launch`
+  /// throws `ArgumentError` otherwise, which is the same refusal-to-decide
+  /// `ContainmentPolicy.decide` makes and for its reason: a parent of unknown
+  /// depth might be at depth 7, and treating it as a fragment root would hand
+  /// its child a fresh budget of three more levels.
+  final String? parentId;
 
   /// What the session is expected to cost, for the budget check. See
   /// `SpawnRequest.estimatedCostUsd` for why 0 is the default.

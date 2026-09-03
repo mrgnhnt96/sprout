@@ -400,6 +400,62 @@ enforced, because that is the only place the merged result exists.
 is that every integration then runs a jaspr build; the alternative is per-path checks, which
 showrunner's config does not appear to express.
 
+### F-26 — Waves are planned against a policy, but admission is decided against a ledger, so a full-width wave can still be refused halfway
+
+**Status: OPEN.** Found by P4-04, which built `planWaves` and is the first thing that has an
+opinion about how wide a wave should be.
+
+`planWaves` (`sproutd/lib/src/decomposition/waves.dart`) caps a wave at
+`min(ContainmentPolicy.maxLiveChildren, ContainmentPolicy.maxLiveNodes)`, because a wave planned
+wider than the policy allows is a plan that gets refused halfway through, leaving a half-spawned
+wave nobody planned for. That much it can do from a value.
+
+What it **cannot** do is know what else in the tree is live. `ContainmentGate.admit` judges
+`maxLiveNodes` against `SpendLedger.liveNodes` — the whole tree at the moment of the launch — so a
+wave planned at the ceiling is admissible only if no other subtree is running. A sibling subtree
+that spawns between planning and spawning consumes the same budget, and the last children of the
+wave are refused with `RefusalReason.concurrency`. The plan is a **ceiling, not a guarantee**, and
+`planWaves`'s doc says so; this entry exists because saying so is not handling it.
+
+F-24 makes it strictly worse rather than being the same thing: a node that dies without ending its
+stream stays live in the ledger and holds a slot nothing releases, so the denominator the gate
+divides by drifts *upward* over a run while the planner keeps assuming the policy's number.
+
+**Why it was not repaired here.** The fix belongs to whoever wires a decomposition to
+`SessionRunner.launch` — P4-05 or later. It is one of: plan against the live ledger rather than the
+policy alone (which makes the planner impure and is why this leaf did not do it), or treat a
+`concurrency` refusal as a signal to hold the remaining children back into the next wave rather
+than as a failure. The second is probably right and it is a spawner's decision, not a value type's.
+Taking it inside this leaf would have meant putting a ledger — and therefore the store — into a
+library whose whole promise is that it has neither.
+
+---
+
+### F-27 — `package:sproutd/decomposition.dart` has no producer and no consumer outside its own test
+
+**Status: OPEN and EXPECTED.** Recorded by P4-04 against itself, because a true premise attached to
+code nothing reaches is void and a green suite cannot tell the difference.
+
+Measured after the leaf landed: `grep -rn "decomposition.dart\|planWaves\|PlannedChild\|Decomposition"
+sproutd/bin sproutd/lib sproutd/routes sproutd/test sprout_protocol/lib sprout_ui/lib` matches the
+library's own source and `sproutd/test/decomposition_test.dart`, and nothing else at all.
+`bin/sprout.dart` never imports it, no route serves it, and no `Decomposition` is ever constructed
+outside that one test file. Everything in it passes and none of it runs in the product.
+
+That is the build order rather than a defect: `docs/01-plan.md` §11 puts *"map/build modes, waves
+over estimated file sets"* in Phase 4, and the campaign's own graph has the two leaves that consume
+this one — **p4-05-delegation-floor-and-mode** (which decides *whether* to decompose and produces
+the `Decomposition`) and **p4-06-parent-acceptance-check** (which evaluates the
+`SuccessCondition`s this leaf made mandatory). Neither has run.
+
+It is written down anyway because of what it costs if they do not. A value type with no producer is
+indistinguishable from one with a producer as long as its own tests are the only caller, and the
+next reader takes a well-tested library as evidence something uses it. **If Phase 4 ends without
+P4-05, this entry is the thing that says the machinery is unreached** — delete it in the commit
+that gives `Decomposition` its first real caller, not before.
+
+---
+
 ---
 
 ## Notes that are not findings

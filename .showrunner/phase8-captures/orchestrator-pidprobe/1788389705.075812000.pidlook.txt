@@ -1,0 +1,2 @@
+69210     1 /Users/USER/.local/bin/claude -p reply with the single word PIDPROBE --settings /private/tmp/claude-501/-Users-USER-Development-dart-sprout/7F85CCE4-B2F4-4C32-BD89-8FAE96105BB8/scratchpad/pidprobe/settings.json --output-format stream-json --verbose
+hookpid=69511 ppid=69210

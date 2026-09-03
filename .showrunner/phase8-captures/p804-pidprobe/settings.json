@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/hook.sh /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/out",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

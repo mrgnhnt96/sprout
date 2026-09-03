@@ -1,0 +1,2 @@
+85003 84992 /Users/USER/.local/bin/claude -p Write a 400 word essay about sqlite write-ahead logging. --settings /private/tmp/claude-501/-Users-USER-Development-dart-sprout/7F85CCE4-B2F4-4C32-BD89-8FAE96105BB8/scratchpad/killprobe2/settings.json --permission-mode bypassPermissions --output-format stream-json --verbose
+hookpid=85161 ppid=85003

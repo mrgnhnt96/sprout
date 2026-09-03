@@ -117,3 +117,149 @@ baseline at dc7ce7d. Same pipeline: pub get; revali build; dart compile exe.
 
    Written before anything parses them (F-15's repair), so a payload the store cannot take
    — one with no session_id, or bytes that are not JSON — is still on disk.
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+APPENDED: P8-04's own proof — the watchdog half.
+
+This half is proved on the LEAF'S BRANCH and against the main checkout at 391b691,
+NOT re-exercised against a compiled trunk binary the way sections 1-5 above are.
+Kept here because .showrunner/scratch/ is gitignored and this evidence would
+otherwise be lost. Re-proving it on trunk is the first item in the Phase 8 handoff.
+═══════════════════════════════════════════════════════════════════════════════════
+
+P8-04 proof — the watchdog measures a session sprout did not spawn
+=================================================================
+Crawler crawler-p804-p8-04-watchdog-foreign-sessions, 2026-09-02.
+Branch showrunner/p8-04-watchdog-foreign-sessions.
+
+Everything below is a real run on this machine. Nothing is stubbed: real
+`claude -p` processes, real hook payloads, a real `ps`, a real `stat`, the
+shipped Watchdog.
+
+
+1. CLAUDE_PID, measured first-hand
+----------------------------------
+docs/research/17-observed-schemas.md §9 claims the hook environment carries
+CLAUDE_PID. The Phase 0 fixtures do not contain the env.txt files that would
+have proved it, so it was measured rather than believed — twice.
+
+  (a) orchestrator's capture, CLI 2.1.258 — scratch/pidprobe/, scratch/killprobe/
+  (b) this Crawler's own capture, CLI 2.1.259 — scratch/p804-pidprobe/
+
+(b), in full. A settings file registering six events, a hook that dumped
+`env | grep '^CLAUDE'` and ran `ps -o pid=,ppid=,command= -p "$CLAUDE_PID"`,
+against `claude -p "reply with the single word P804PROBE" --model haiku`:
+
+  events fired: SessionStart, UserPromptSubmit, Stop, SessionEnd
+  CLAUDE_PID=52305                     on all four, identical
+  CLAUDE_CODE_SESSION_ID=dc765771-9bf4-4d0e-a0f9-46bf57167b25
+  session_id in every payload           = dc765771-9bf4-4d0e-a0f9-46bf57167b25
+  CLAUDE_CODE_EXECPATH=/Users/…/versions/2.1.259
+
+  $ ps -o pid=,ppid=,command= -p 52305
+  52305 52303 /Users/…/.local/bin/claude -p reply with the single word P804PROBE …
+  hookshell_pid=52329 hookshell_ppid=52305
+
+So CLAUDE_PID is the `claude` process itself and the hook shell's own parent —
+not the hook, not a wrapper. transcript_path was the root session's .jsonl on
+every one of the four.
+
+
+2. A killed session fires no ending — measured
+----------------------------------------------
+From the orchestrator's killprobe capture (scratch/killprobe/), a session killed
+mid-turn with kill -9 produced exactly:
+
+  1788389785.973  SessionStart
+  1788389786.369  UserPromptSubmit
+        (kill -9 at ~6s, mid-turn)
+  process gone — no Stop, no SessionEnd
+
+The same prompt allowed to finish produced SessionStart, UserPromptSubmit,
+PreToolUse, PostToolUse, Stop, SessionEnd. So a closed terminal leaves a
+hook-observed root `working` forever with a dead pid, which is `abandoned`.
+What the ring cap does with that is measured in section 4 and recorded as F-20.
+
+
+3. THE DEMONSTRATION — a foreign session stalls, and the watchdog rings
+-----------------------------------------------------------------------
+A real Phase 0 hook capture (A/SessionStart, A/UserPromptSubmit) with its
+session id and transcript path pointed at the demo's own files, folded through
+the shipped HookProjection with CLAUDE_PID naming a real live process that
+writes nothing. Program: scratch/demo/demo.dart. Verbatim output:
+
+  a session sprout did NOT spawn, pid 15925
+  node   hook/demo-0000-4000-8000-000000000804
+  status working
+  feed   runner.observed, process.observed, hook.SessionStart, runner.updated, hook.UserPromptSubmit
+  
+  --- immediately, while the transcript is fresh ---
+  live: pid 15925 is alive and started at 2026-09-03 00:06:59.000Z; the transcript last grew 0s ago (threshold 3s ago)
+  
+  --- after 4s of silence (threshold 3s) ---
+  RING   hook/demo-0000-4000-8000-000000000804 is stalled (ring 1) — pid 15925 is alive and started at 2026-09-03 00:06:59.000Z; the transcript last grew 4s ago (threshold 3s ago)
+  sweep  rang for 1 of 1 node(s): hook/demo-0000-4000-8000-000000000804 stalled
+
+Read the feed line: `process.observed` sits beside the `hook.*` payload rows and
+there is no `runner.spawned` anywhere — the feed does not claim sprout launched
+this process, and the measurement still works.
+
+BEFORE — the same program, unchanged, run against the MAIN CHECKOUT at
+391b691 (P8-03 merged, this leaf not applied), whose HookProjection has no
+`environment` parameter and so cannot learn a pid. scratch/before/. Verbatim:
+
+  a session sprout did NOT spawn, pid 19469
+  node   hook/demo-0000-4000-8000-000000000804
+  status working
+  feed   runner.observed, hook.SessionStart, runner.updated, hook.UserPromptSubmit
+  
+  --- immediately, while the transcript is fresh ---
+  abandoned: no runner.spawned event for this node, and no ending recorded
+  
+  --- after 4s of silence (threshold 3s) ---
+  RING   hook/demo-0000-4000-8000-000000000804 is abandoned (ring 1) — no runner.spawned event for this node, and no ending recorded
+  sweep  rang for 1 of 1 node(s): hook/demo-0000-4000-8000-000000000804 abandoned
+
+That is the gap this leaf closes, and it was worse than "cannot measure": the
+watchdog rang `abandoned` at a session that was alive and healthy, on the
+strength of having no record rather than of any observation — because
+`LivenessMeasure._newestSpawn` matched only `runner.spawned`, so every
+hook-observed node fell through to `_whyNotStarted`.
+
+
+4. The suite — 470 tests, 18 of them new
+-----------------------------------------
+  cd sproutd && dart format --output=none --set-exit-if-changed .   OK (0 changed)
+  cd sproutd && dart analyze --fatal-infos --fatal-warnings         No issues found!
+  cd sproutd && dart test                                           All tests passed! (470)
+  cd sprout_protocol && dart format --output=none --set-exit-if-changed .  OK
+  cd sprout_protocol && dart analyze --fatal-infos --fatal-warnings  No issues found!
+  cd sprout_ui && dart test                                          All tests passed! (68)
+
+New, all driven through HookProjection rather than by writing rows —
+test/liveness_test.dart group "a session sprout did not spawn — P8-04":
+
+  live foreign root, pid alive + transcript fresh          => live
+  same root, transcript frozen past threshold              => stalled
+  same root after Stop                                     => ended
+  live foreign SUBAGENT                                    => unmeasured, NOT abandoned
+  the root's pid never reaches the child as `pid`          (kept as `session_pid`)
+  live pid recorded an hour ago, process younger           => the recycled-pid verdict,
+                                                              same words as the runner path
+  root whose hook had no CLAUDE_PID                        => unmeasured, not abandoned
+  environment naming a different session                   => no pid recorded
+  one process record per node, not per payload             (4 payloads, 1 record)
+  runner-spawned node                                      => unaffected
+
+test/watchdog_test.dart group "8 — a session sprout did not spawn (P8-04)":
+
+  stalled foreign session                                  => rings, page is arguable by hand
+  same session after Stop, three sweeps                    => never rings
+  live foreign subagent                                    => blind on the board, no ring
+  killed session (dead pid, no ending), six sweeps         => rings 1, 2, 3 then silenced;
+                                                              a RESTARTED watchdog rings from 1
+                                                              again — this is F-20
+  a tree holding both paths at once                        => no ring, 2 nodes swept
+
+No existing assertion was changed anywhere.

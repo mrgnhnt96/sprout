@@ -1,0 +1,2 @@
+52305 52303 /Users/USER/.local/bin/claude -p reply with the single word P804PROBE --settings /Users/USER/Development/dart/sprout/.showrunner/scratch/crawler-p804-p8-04-watchdog-foreign-sessions/p804-pidprobe/settings.json --model haiku --output-format stream-json --verbose
+hookshell_pid=52444 hookshell_ppid=52305

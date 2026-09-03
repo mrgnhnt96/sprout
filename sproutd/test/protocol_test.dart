@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:sproutd/acceptance.dart';
+import 'package:sproutd/decomposition.dart';
 import 'package:sproutd/hooks.dart';
 import 'package:sproutd/liveness.dart';
 import 'package:sproutd/protocol.dart';
@@ -1100,6 +1101,52 @@ void main() {
           runnerLaunchFailedKind,
           runnerSessionKind,
           runnerExitedKind,
+        }),
+        isEmpty,
+      );
+    });
+  });
+
+  group('and so are the delegate event kinds', () {
+    // P4-07. `sprout delegate` is the first thing that turns a `Decomposition`
+    // into processes, and the row it writes is about the *plan* rather than
+    // about any one session.
+
+    test('the planned kind keeps its spelling', () {
+      expect(delegateKindPrefix, 'delegate.');
+      expect(delegatePlannedKind, 'delegate.planned');
+    });
+
+    test('it carries its own prefix and is nobody else\'s kind', () {
+      expect(delegatePlannedKind, startsWith(delegateKindPrefix));
+      for (final other in {
+        acceptanceKindPrefix,
+        hookKindPrefix,
+        frameKindPrefix,
+        worktreeKindPrefix,
+        'runner.',
+      }) {
+        expect(delegatePlannedKind, isNot(startsWith(other)));
+      }
+      expect(
+        {delegatePlannedKind}.intersection({
+          ...hookKindsByEventName.values,
+          hookUnknownKind,
+          hookMalformedKind,
+          observedProcessKind,
+          nodeObservedKind,
+          nodeUpdatedKind,
+          runnerSpawnedKind,
+          runnerRefusedKind,
+          runnerLaunchFailedKind,
+          runnerSessionKind,
+          runnerExitedKind,
+          acceptanceAcceptedKind,
+          acceptanceRejectedKind,
+          acceptanceUndecidableKind,
+          worktreeCreatedKind,
+          worktreeKeptKind,
+          worktreeRemovedKind,
         }),
         isEmpty,
       );

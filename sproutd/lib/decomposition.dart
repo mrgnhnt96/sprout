@@ -85,6 +85,9 @@
 /// §2.3, §2.4, §3 and §11.
 library;
 
+export 'package:sprout_protocol/values.dart'
+    show delegateKindPrefix, delegatePlannedKind;
+
 export 'src/decomposition/decomposition.dart'
     show Decomposition, PlannedChild, SuccessCondition;
 export 'src/decomposition/estimate.dart'
@@ -104,4 +107,5 @@ export 'src/decomposition/floor.dart'
         FloorReason;
 export 'src/decomposition/mode.dart'
     show DelegationMode, ModeChoice, buildWaveWidth;
+export 'src/decomposition/plan.dart' show PlanFormatException, parsePlan;
 export 'src/decomposition/waves.dart' show Wave, WavePlan, planWaves;

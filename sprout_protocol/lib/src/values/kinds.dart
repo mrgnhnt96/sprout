@@ -442,3 +442,34 @@ const String acceptanceRejectedKind = '${acceptanceKindPrefix}rejected';
 /// rejected one does. The two are different rows because they are different
 /// facts, and only one of them means the work was looked at.
 const String acceptanceUndecidableKind = '${acceptanceKindPrefix}undecidable';
+
+/// The prefix on every kind recording what sprout did about a **decomposition**
+/// — a parent's decision to split its task into children and run them in waves.
+///
+/// Its own prefix rather than a `runner.*` kind, on [worktreeKindPrefix]'s
+/// argument: a `runner.*` row is about one process, and these rows are about a
+/// *plan* over several — how many children, laid out into how many waves, under
+/// which of `docs/01-plan.md` §2.3's two modes. A reader that took one for a
+/// lifecycle row would be wrong about the only field that matters on it.
+const String delegateKindPrefix = 'delegate.';
+
+/// The event appended when the delegation floor **permitted** a decomposition
+/// and sprout is about to run its waves.
+///
+/// Attributed to the delegation's own node — the parent row the children hang
+/// off by `parent_id` — and written once, before the first child is spawned.
+/// The payload carries the child count, the wave layout (each wave's child ids
+/// and the isolation reason where one was forced open), the mode and whether
+/// anybody chose it, and the widest wave the plan was allowed.
+///
+/// **There is deliberately no `delegate.refused` kind**, for
+/// [worktreeCreatedKind]'s reason exactly. `docs/01-plan.md` §3 makes *not*
+/// decomposing the cheapest win in the design, so the floor refusing is the
+/// common case and the one most worth recording — but the floor is consulted
+/// **before** any node row exists, and `event.node_id` carries a foreign key
+/// onto `node (id)` with `PRAGMA foreign_keys=ON`. A row for a delegation that
+/// never happened could not be inserted. The refusal reaches the operator on
+/// stderr, with the floor's running tally beside it, and through an exit code
+/// of its own. That the tally is therefore per-process is a real limit and is
+/// stated in `docs/02-open-findings.md` rather than papered over.
+const String delegatePlannedKind = '${delegateKindPrefix}planned';

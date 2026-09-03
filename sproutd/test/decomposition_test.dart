@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:sproutd/decomposition.dart';
@@ -994,6 +995,368 @@ void main() {
       expect(
         banned.hasMatch(File('lib/src/worktree/git.dart').readAsStringSync()),
         isTrue,
+      );
+    });
+  });
+
+  group('a plan read out of a file', () {
+    // P4-07. The reader is what gives this library a producer; before it, the
+    // only `Decomposition` in the repository was built by this file (F-27).
+
+    String plan({
+      Object? mode = const {
+        'declared': {'mode': 'map', 'reason': 'independent and read-only'},
+      },
+      List<Object?>? children,
+      Map<String, Object?> extra = const {},
+    }) => jsonEncode({
+      'parent_id': 'the-split',
+      'task': 'do several things',
+      'mode': mode,
+      'children':
+          children ??
+          [
+            {
+              'id': 'a',
+              'task': 'do a',
+              'files': {
+                'paths': ['lib/a.dart'],
+              },
+              'success_conditions': [
+                {
+                  'command': ['dart', 'test'],
+                },
+              ],
+            },
+          ],
+      ...extra,
+    });
+
+    test('round-trips the fields the types require', () {
+      final decomposition = parsePlan(plan());
+      expect(decomposition.parentId, 'the-split');
+      expect(decomposition.task, 'do several things');
+      expect(decomposition.mode.mode, DelegationMode.map);
+      expect(decomposition.mode.wasDefaulted, isFalse);
+      expect(decomposition.children, hasLength(1));
+      final child = decomposition.children.single;
+      expect(child.id, 'a');
+      expect(child.files, isA<EstimatedPaths>());
+      expect(child.successConditions.single.command, ['dart', 'test']);
+      expect(child.successConditions.single.workingDirectory, isNull);
+    });
+
+    test('all THREE file estimates are spellable, and they are three '
+        'different values', () {
+      // The inversion this area exists against: if the reader could spell only
+      // two of them, the third would have to be written as one of the others,
+      // and an absent estimate written as an empty set overlaps nothing — so
+      // the child nobody could estimate would parallelise with everything.
+      final decomposition = parsePlan(
+        plan(
+          children: [
+            {
+              'id': 'paths',
+              'task': 't',
+              'files': {
+                'paths': ['lib/a.dart'],
+              },
+              'success_conditions': [
+                {
+                  'command': ['true'],
+                },
+              ],
+            },
+            {
+              'id': 'nothing',
+              'task': 't',
+              'files': {'touches_nothing': 'it only reads'},
+              'success_conditions': [
+                {
+                  'command': ['true'],
+                },
+              ],
+            },
+            {
+              'id': 'unknown',
+              'task': 't',
+              'files': {'unknown': 'the issue names no path'},
+              'success_conditions': [
+                {
+                  'command': ['true'],
+                },
+              ],
+            },
+          ],
+        ),
+      );
+      final byId = {
+        for (final child in decomposition.children) child.id: child.files,
+      };
+      expect(byId['paths'], isA<EstimatedPaths>());
+      expect(byId['nothing'], isA<TouchesNothing>());
+      expect(byId['unknown'], isA<UnknownFiles>());
+      // And the third one still collides with everything, which is the whole
+      // reason it has to be spellable.
+      expect(byId['unknown']!.overlaps(byId['nothing']!), isTrue);
+      expect(byId['nothing']!.overlaps(byId['paths']!), isFalse);
+    });
+
+    test('an empty path list is refused by the type, and the message says '
+        'which of the other two to use', () {
+      expect(
+        () => parsePlan(
+          plan(
+            children: [
+              {
+                'id': 'a',
+                'task': 't',
+                'files': {'paths': <String>[]},
+                'success_conditions': [
+                  {
+                    'command': ['true'],
+                  },
+                ],
+              },
+            ],
+          ),
+        ),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => '$e',
+            'message',
+            allOf(contains('TouchesNothing'), contains('UnknownFiles')),
+          ),
+        ),
+      );
+    });
+
+    test('two estimates at once is refused, and so is none', () {
+      for (final files in [
+        <String, Object?>{
+          'paths': ['lib/a.dart'],
+          'unknown': 'nobody knows',
+        },
+        <String, Object?>{},
+      ]) {
+        expect(
+          () => parsePlan(
+            plan(
+              children: [
+                {
+                  'id': 'a',
+                  'task': 't',
+                  'files': files,
+                  'success_conditions': [
+                    {
+                      'command': ['true'],
+                    },
+                  ],
+                },
+              ],
+            ),
+          ),
+          throwsA(
+            isA<PlanFormatException>().having(
+              (e) => e.where,
+              'where',
+              'children[0].files',
+            ),
+          ),
+        );
+      }
+    });
+
+    test('an absent cost is UNKNOWN and is not a measured zero', () {
+      final decomposition = parsePlan(
+        plan(
+          children: [
+            {
+              'id': 'costed',
+              'task': 't',
+              'files': {
+                'paths': ['lib/a.dart'],
+              },
+              'estimated_cost_usd': 0.25,
+              'success_conditions': [
+                {
+                  'command': ['true'],
+                },
+              ],
+            },
+            {
+              'id': 'uncosted',
+              'task': 't',
+              'files': {
+                'paths': ['lib/b.dart'],
+              },
+              'success_conditions': [
+                {
+                  'command': ['true'],
+                },
+              ],
+            },
+          ],
+        ),
+      );
+      // F-23 and INV7 at the file boundary: a sum is not a distribution, so
+      // the count of what was never estimated has to survive the read.
+      expect(decomposition.knownEstimatedCostUsd, 0.25);
+      expect(decomposition.childrenWithoutCostEstimate, 1);
+      expect(decomposition.children.last.estimatedCostUsd, isNull);
+    });
+
+    test('the mode is one of declared or defaulted, never both and never '
+        'absent', () {
+      expect(
+        parsePlan(plan(mode: {'defaulted': 'nobody looked'})).mode.wasDefaulted,
+        isTrue,
+      );
+      expect(
+        parsePlan(plan(mode: {'defaulted': 'nobody looked'})).mode.mode,
+        DelegationMode.build,
+      );
+      for (final mode in <Object>[
+        <String, Object?>{},
+        {
+          'declared': {'mode': 'map', 'reason': 'r'},
+          'defaulted': 'nobody looked',
+        },
+      ]) {
+        expect(
+          () => parsePlan(plan(mode: mode)),
+          throwsA(
+            isA<PlanFormatException>().having((e) => e.where, 'where', 'mode'),
+          ),
+        );
+      }
+      // And an absent mode does not quietly become the default. §2.3 requires
+      // the choice to be made; a reader that filled it in would be the field
+      // nobody set, one layer up.
+      expect(
+        () => parsePlan(
+          jsonEncode({
+            'parent_id': 'x',
+            'task': 'y',
+            'children': [
+              {
+                'id': 'a',
+                'task': 't',
+                'files': {
+                  'paths': ['lib/a.dart'],
+                },
+                'success_conditions': [
+                  {
+                    'command': ['true'],
+                  },
+                ],
+              },
+            ],
+          }),
+        ),
+        throwsA(isA<PlanFormatException>()),
+      );
+    });
+
+    test('an unknown key is refused wherever it appears, and named', () {
+      for (final (source, where) in <(String, String)>[
+        (plan(extra: {'childrne': <Object?>[]}), 'the file'),
+        (
+          plan(
+            children: [
+              {
+                'id': 'a',
+                'task': 't',
+                'files': {
+                  'paths': ['lib/a.dart'],
+                },
+                'succes_conditions': [
+                  {
+                    'command': ['true'],
+                  },
+                ],
+                'success_conditions': [
+                  {
+                    'command': ['true'],
+                  },
+                ],
+              },
+            ],
+          ),
+          'children[0]',
+        ),
+      ]) {
+        expect(
+          () => parsePlan(source),
+          throwsA(
+            isA<PlanFormatException>().having((e) => e.where, 'where', where),
+          ),
+        );
+      }
+    });
+
+    test('the message says where, down to the element', () {
+      expect(
+        () => parsePlan(
+          plan(
+            children: [
+              {
+                'id': 'a',
+                'task': 't',
+                'files': {
+                  'paths': ['lib/a.dart'],
+                },
+                'success_conditions': [
+                  {
+                    'command': ['true'],
+                  },
+                  {'command': 7},
+                ],
+              },
+            ],
+          ),
+        ),
+        throwsA(
+          isA<PlanFormatException>().having(
+            (e) => e.where,
+            'where',
+            'children[0].success_conditions[1].command',
+          ),
+        ),
+      );
+    });
+
+    test('a map decomposition carrying shared decisions is refused by the '
+        'constructor, not softened by the reader', () {
+      expect(
+        () => parsePlan(
+          plan(
+            extra: {
+              'shared_decisions': ['use package:args'],
+            },
+          ),
+        ),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => '$e',
+            'message',
+            contains('map decomposition'),
+          ),
+        ),
+      );
+    });
+
+    test('text that is not JSON at all is refused as the file, not as a '
+        'field', () {
+      expect(
+        () => parsePlan('not json'),
+        throwsA(
+          isA<PlanFormatException>().having(
+            (e) => e.where,
+            'where',
+            'the file',
+          ),
+        ),
       );
     });
   });

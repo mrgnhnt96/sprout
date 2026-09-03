@@ -64,6 +64,21 @@ const caretRanged = {'args', 'path', 'test', 'lints'};
 /// daemon with it, while a hook runs inside the developer's own session and a
 /// throw there breaks the thing sprout was watching. Keeping them apart is what
 /// lets that stricter promise be a property of an area rather than a habit.
+///
+/// `worktree` is P4-03's: `git worktree add` for one node's session, and the
+/// safe teardown that mostly refuses. It is its own area rather than a corner
+/// of `runner` on exactly the argument above — it shells out to `git` and
+/// deletes directories under a promise the runner does not make, that it never
+/// destroys work — and being an area is what lets `test/worktree_test.dart`
+/// read the whole of `lib/src/worktree/` and assert that `--force` and
+/// `git branch -D` appear nowhere in it, the way `test/liveness_test.dart`
+/// greps its own area for a kill. A guard over a corner of another library
+/// would cover whichever files happened to sit beside it.
+///
+/// It is named `worktree` and not `workspace`, which was the obvious choice:
+/// `workspace` is a first-class pubspec concept in Dart 3.6 and up, and this is
+/// a Dart monorepo, so a `lib/workspace.dart` would name the one thing in the
+/// repository it is not about.
 const libraries = {
   'store',
   'stream',
@@ -76,6 +91,7 @@ const libraries = {
   'liveness',
   'watchdog',
   'hooks',
+  'worktree',
 };
 
 /// The libraries whose declarations now live in `package:sprout_protocol`.

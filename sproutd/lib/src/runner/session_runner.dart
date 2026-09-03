@@ -58,6 +58,28 @@ double spawnBudgetUsd(
   return remaining;
 }
 
+final Random _idRandom = Random.secure();
+
+/// Mints a node id: a millisecond timestamp in base 36, then 32 random bits.
+///
+/// Public because a caller sometimes has to know the id **before** the launch.
+/// `sprout run --worktree` is the case that made it so: the worktree's path is
+/// derived from the node id and goes into `SessionRequest.project`, which is
+/// written onto the node row — and `SproutStore.putNode` deliberately does not
+/// emit a patch for `project`, so a row created with one project and corrected
+/// afterwards would correct only the database and never the feed. Minting here
+/// and passing `SessionRequest.nodeId` is what keeps the row right the first
+/// time.
+///
+/// Sortable by the timestamp and unique by the salt, in that order, so ids
+/// group by run in any listing that sorts them while two spawned in the same
+/// millisecond still differ.
+String newNodeId() {
+  final stamp = DateTime.now().toUtc().millisecondsSinceEpoch;
+  final salt = _idRandom.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
+  return '${stamp.toRadixString(36)}-$salt';
+}
+
 /// Spawns `claude -p` sessions, streams each one to disk and into the store,
 /// and reports how it ended.
 ///
@@ -101,13 +123,7 @@ final class SessionRunner {
   final DateTime Function() _clock;
   final String Function() _mintNodeId;
 
-  static final Random _random = Random.secure();
-
-  static String _defaultNodeId() {
-    final stamp = DateTime.now().toUtc().millisecondsSinceEpoch;
-    final salt = _random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-    return '${stamp.toRadixString(36)}-$salt';
-  }
+  static const String Function() _defaultNodeId = newNodeId;
 
   /// Runs [request] to completion: [launch], then wait for the process to end.
   Future<SessionOutcome> run(SessionRequest request, {SpendLedger? ledger}) {

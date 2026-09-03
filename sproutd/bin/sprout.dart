@@ -3,7 +3,7 @@
 /// Six verbs:
 ///
 /// ```
-/// sprout run [--parent <node>] "<task>"
+/// sprout run [--parent <node>] [--worktree [--base <ref>]] "<task>"
 /// sprout snapshot [--json]
 /// sprout watch [--since <cursor>] [--json]
 /// sprout ui
@@ -21,10 +21,13 @@
 ///
 /// `run` spawns exactly one `claude -p` session through
 /// `package:sproutd/runner.dart` and streams its events to disk and into the
-/// store. It spawns nothing else — decomposition, waves and a worktree per
-/// child are the rest of Phase 4 — but since P4-02 the one session it spawns
-/// can be given a `--parent`, and the ledger it is judged against is read off
-/// the store rather than being empty. That is what makes the containment gate
+/// store. It spawns nothing else — decomposition and waves are the rest of
+/// Phase 4 — but since P4-02 the one session it spawns can be given a
+/// `--parent`, and the ledger it is judged against is read off the store rather
+/// than being empty. P4-03 added `--worktree`, which gives that one session a
+/// git worktree of its own and attempts to tear it down when it ends; the
+/// teardown refuses whenever the worktree holds work, which is most of the
+/// time and is the point of it. That is what makes the containment gate
 /// able to refuse: a depth, an ancestor's spent dollars and a live count all
 /// come from nodes the store already holds.
 ///
@@ -71,6 +74,7 @@ import 'package:sproutd/store.dart';
 import 'package:sproutd/stream.dart';
 import 'package:sproutd/watch.dart';
 import 'package:sproutd/watchdog.dart';
+import 'package:sproutd/worktree.dart';
 
 // The generated Revali entrypoint, and the app it builds `MainApp` from.
 //
@@ -133,6 +137,21 @@ const int exitStoreUnreadable = 6;
 /// ask for is a URL their browser tab is not pointed at, and the second
 /// daemon would be invisible except in whichever terminal printed it.
 const int exitPortInUse = 7;
+
+/// `--worktree` was asked for and sprout **declined** to create one, because
+/// the path or the branch is already taken.
+///
+/// Its own code rather than [exitUsage]: the arguments were fine, and the
+/// remedy is to look at what is already there — it may hold the only copy of
+/// another session's work — rather than to fix a flag.
+const int exitWorktreeRefused = 8;
+
+/// `--worktree` was asked for and **git** could not make one.
+///
+/// Distinct from [exitWorktreeRefused] on the same argument [exitLaunchFailed]
+/// makes against [exitRefused]: one is sprout deciding no, the other is the
+/// machine, and one code for both would hide which a run hit.
+const int exitWorktreeFailed = 9;
 
 /// Bad arguments. `EX_USAGE` from sysexits.h.
 const int exitUsage = 64;
@@ -273,6 +292,49 @@ Future<int> sprout(
 }
 
 /// `sprout run "<task>"`.
+///
+/// **`--worktree`, and where the worktree path is recorded.** With the flag,
+/// the session's process runs in a git worktree created for its node —
+/// `.worktrees/sprout-<node>` on branch `sprout/<node>`, cut from `--base` —
+/// instead of in `--project`, and when the session ends the teardown is
+/// attempted and its answer printed and appended to the feed. That teardown
+/// refuses far more often than it succeeds, because a session's whole job is to
+/// leave changes behind; see `package:sproutd/worktree.dart`.
+///
+/// The worktree path goes in the node row's **`project`** column, and the
+/// repository root goes in the `worktree.created` payload. There is no column
+/// for a worktree path and `SproutStore`'s schema stays at version 1: this leaf
+/// adds no migration.
+///
+/// That is a decision with a cost, and the cost was checked rather than
+/// assumed. `docs/research/08-token-cost-audit.md` measured that Claude Code
+/// files worktree sessions as separate top-level projects, which is how 43.98%
+/// of a $3k spend landed in a lane nobody had named — so anything that grouped
+/// sprout's own tree by `project` would split a parent from its children the
+/// same way. Nothing does: `sprout_ui`'s board builds its tree from `parent_id`
+/// and depth, and `grep -rn project sprout_ui/lib` finds `project` only as a
+/// rendered field. The hazard is real for a future grouping and is not present
+/// today.
+///
+/// What *is* present today argues the other way, and decided it. The one
+/// single-consumer resource sprout can observe is derived straight from this
+/// column — `heldResourcesOf` in `package:sprout_protocol`, which reports
+/// `node.project` as held for as long as the node is live. A child in its own
+/// worktree with the repository root in `project` would be reported as
+/// contending with its parent for one directory, which is precisely the
+/// contention a worktree per child exists to remove. Recording the worktree
+/// makes that report true; recording the repository root would make sprout
+/// announce a conflict that does not exist.
+///
+/// **When the worktree is created.** Before the containment gate is asked, not
+/// after it permits. That is the more expensive order and it is the one the
+/// code allows: `SessionRunner.launch` writes the node row before consulting
+/// the gate, the row carries `project`, and `SproutStore.putNode` deliberately
+/// emits no `runner.updated` patch for `project` — so a worktree created after
+/// the permit would have to correct a row the feed had already announced, and
+/// the correction would reach the database and never the socket. The waste is
+/// bounded instead: a refused spawn started no process, so its worktree is
+/// clean and the teardown that follows really removes it.
 final class RunCommand extends Command<int> {
   /// Creates the verb.
   RunCommand({
@@ -317,6 +379,23 @@ final class RunCommand extends Command<int> {
         'claude',
         help: 'The claude executable to launch.',
         defaultsTo: 'claude',
+      )
+      ..addFlag(
+        'worktree',
+        negatable: false,
+        help:
+            'Run the session in a git worktree created for it under '
+            '--project\'s repository, and attempt to tear that worktree down '
+            'when the session ends. The teardown refuses whenever the '
+            'worktree holds work.',
+      )
+      ..addOption(
+        'base',
+        help:
+            'The ref --worktree cuts the new branch from. Resolved to a '
+            'commit at creation, because the ref will have moved by the time '
+            'anything tears the worktree down.',
+        defaultsTo: 'HEAD',
       );
   }
 
@@ -375,6 +454,8 @@ final class RunCommand extends Command<int> {
         budgetUsd: budget,
         logDirectory: logDirectory,
         executable: results['claude'] as String,
+        useWorktree: results['worktree'] as bool,
+        base: results['base'] as String,
       );
     } finally {
       store.close();
@@ -389,6 +470,8 @@ final class RunCommand extends Command<int> {
     required double budgetUsd,
     required String logDirectory,
     required String executable,
+    required bool useWorktree,
+    required String base,
   }) async {
     // One ceiling for the subtree and one for the run, both `--budget-usd`.
     // They are the same number because this verb takes one number; they are
@@ -431,25 +514,169 @@ final class RunCommand extends Command<int> {
     // `ObservedLedger`, and INV7.
     out.writeln('tree ${observed.spendLabel}');
 
+    // The worktree, if one was asked for, is created BEFORE the launch rather
+    // than after the gate has permitted it — which is the more expensive of
+    // the two orders and is the one the code allows.
+    //
+    // The cheap order would be to create it only once the spawn is permitted,
+    // so a refusal costs no `git worktree add` at all. It cannot be done
+    // honestly here: `SessionRunner.launch` writes the node row before it asks
+    // the gate, the row carries `project`, and `SproutStore.putNode`
+    // deliberately emits no patch for `project` — see `_updatedPayload`, which
+    // says so and gives the reason. A worktree created after the permit would
+    // therefore have to correct a row the feed had already announced, and the
+    // correction would reach the database and never the socket. Every consumer
+    // built from deltas would keep pointing at the repository root.
+    //
+    // So it is created first, `SessionRequest.nodeId` is minted here so the
+    // path can be derived from it, and the waste on a refusal is bounded by
+    // tearing the worktree down immediately afterwards — which succeeds,
+    // because nothing ever ran in it.
+    String? nodeId;
+    Worktrees? worktrees;
+    WorktreeCreated? room;
+    if (useWorktree) {
+      final repositoryRoot = await Worktrees.repositoryRootOf(project);
+      if (repositoryRoot == null) {
+        err.writeln(
+          'sprout: --worktree needs a git repository, and $project is not in '
+          'one',
+        );
+        return exitUsage;
+      }
+      worktrees = Worktrees(repositoryRoot: repositoryRoot);
+      nodeId = newNodeId();
+      final creation = await worktrees.create(nodeId: nodeId, base: base);
+      switch (creation) {
+        case WorktreeRefused(:final reason, :final explanation):
+          err
+            ..writeln('sprout: no worktree (${reason.wire})')
+            ..writeln(explanation);
+          return exitWorktreeRefused;
+        case WorktreeCreateFailed(:final explanation):
+          err.writeln('sprout: git could not make a worktree: $explanation');
+          return exitWorktreeFailed;
+        case WorktreeCreated():
+          room = creation;
+      }
+      // The node's `project` becomes the worktree, because that is genuinely
+      // where the session's files are. See [RunCommand] for why that is the
+      // right column and what it costs.
+      project = room.path;
+      out.writeln('worktree ${room.path}');
+      out.writeln('branch   ${room.branch}  from ${room.base} ${room.baseSha}');
+    }
+
     final SessionStart start;
     try {
       start = await runner.launch(
-        SessionRequest(task: task, project: project, parentId: parentId),
+        SessionRequest(
+          task: task,
+          project: project,
+          nodeId: nodeId,
+          parentId: parentId,
+        ),
         ledger: observed.ledger,
       );
     } on ProcessException catch (error) {
       err.writeln('sprout: could not start $executable: ${error.message}');
+      // The node row exists by now — `launch` writes it before it reaches the
+      // launcher, and appends `runner.launch_failed` on the way out — so the
+      // worktree's own events have something to hang off.
+      if (worktrees != null && room != null && nodeId != null) {
+        _recordWorktree(store, worktrees, nodeId, room);
+        await _tearDown(store, worktrees, nodeId, room);
+      }
       return exitLaunchFailed;
     }
 
+    // Appended after the launch rather than before it, and not by choice:
+    // `event.node_id` carries a foreign key onto `node (id)` with
+    // `PRAGMA foreign_keys=ON`, and `launch` is what writes that row. A
+    // `worktree.created` emitted at the moment of creation could not be
+    // inserted at all.
+    if (worktrees != null && room != null) {
+      _recordWorktree(store, worktrees, start.nodeId, room);
+    }
+
+    final int code;
     switch (start) {
       case RefusedSession(:final nodeId, :final refusal):
         err
           ..writeln('sprout: refused (${refusal.reason.wire}), node $nodeId')
           ..writeln(refusal.explanation);
-        return exitRefused;
+        code = exitRefused;
       case LiveSession():
-        return _watch(start);
+        code = await _watch(start);
+    }
+
+    // Attempted on every ending, including a refusal. A refused spawn started
+    // no process, so its worktree is clean and the teardown really removes it;
+    // a session that ran will almost always have left something behind, and
+    // the teardown will say so and keep it. Both are honest, and the refusal
+    // case is what keeps the create-before-the-gate order above from leaking
+    // a directory per refusal.
+    if (worktrees != null && room != null) {
+      await _tearDown(store, worktrees, start.nodeId, room);
+    }
+    return code;
+  }
+
+  /// Records the worktree a session is running in, on the node's own feed.
+  ///
+  /// The repository root goes in the payload because the node row's `project`
+  /// column now holds the worktree path instead, and losing which repository a
+  /// worktree was cut from would make the record unusable to anything that
+  /// later wanted to tear it down.
+  void _recordWorktree(
+    SproutStore store,
+    Worktrees worktrees,
+    String nodeId,
+    WorktreeCreated room,
+  ) {
+    store.append(
+      nodeId: nodeId,
+      kind: worktreeCreatedKind,
+      payload: {
+        'path': room.path,
+        'branch': room.branch,
+        'base': room.base,
+        'base_sha': room.baseSha,
+        'repository': worktrees.repositoryRoot,
+      },
+    );
+  }
+
+  /// Attempts the teardown and reports the answer, whichever way it went.
+  ///
+  /// Never silent on either branch (INV8): a teardown that printed only when
+  /// it removed something could not be told from one that never ran, and it is
+  /// the *kept* answer that a human has to act on.
+  Future<void> _tearDown(
+    SproutStore store,
+    Worktrees worktrees,
+    String nodeId,
+    WorktreeCreated room,
+  ) async {
+    final teardown = await worktrees.remove(
+      nodeId: nodeId,
+      baseSha: room.baseSha,
+    );
+    switch (teardown) {
+      case WorktreeRemoved():
+        out.writeln('worktree ${teardown.label}');
+        store.append(
+          nodeId: nodeId,
+          kind: worktreeRemovedKind,
+          payload: teardown.toJson(),
+        );
+      case WorktreeKept():
+        err.writeln('sprout: worktree ${teardown.label}');
+        store.append(
+          nodeId: nodeId,
+          kind: worktreeKeptKind,
+          payload: teardown.toJson(),
+        );
     }
   }
 

@@ -313,12 +313,64 @@ segfaulted — leaves a row that reads `working` forever. Twelve of those across
 `RefusalReason.concurrency`, correctly by its own rules and wrongly in fact, with no verb to clear
 them.
 
+**P4-03 found the same root cause holding a second resource, and it is worse than a slot.** With
+`--worktree`, a session's git worktree is created before the launch and torn down by the CLI when
+`sprout run` returns. Both halves of that live in `RunCommand._run` and nowhere else: `grep -rn
+worktreeRemovedKind sproutd/lib sproutd/bin` finds the CLI's `_tearDown` and the kind declaration,
+and nothing that reads a `worktree.created` row back out of the feed. So the teardown runs only on
+the path where the same process that created the worktree also observed the session end.
+
+A session killed mid-stream is exactly the path where that does not happen — the `sprout run`
+process is gone too — so the row stays `working` forever *and* the worktree stays on disk forever,
+for one root cause. The worktree is the more expensive of the two, because a concurrency slot is
+recoverable by editing a row and a worktree is a directory holding a branch that may carry the only
+copy of a session's work: whatever eventually reconciles a dead node must not simply delete it. The
+mechanism to do that safely already exists and is deliberately not wired to anything automatic —
+`Worktrees.remove` in `package:sproutd/worktree.dart` refuses on uncommitted changes, on untracked
+files, on unmerged commits and on a look that failed. What is missing is the caller, and the
+`worktree.created` payload carries everything one would need (`path`, `branch`, `base_sha`,
+`repository`) precisely so that a later process can find the worktree without having created it.
+
 This compounds with **F-17**, which is the same absence one layer down: there is no `NodeStatus`
 meaning *the process is gone*, so even a human reading the board cannot tell a paused session from
 a dead one. Phase 6's `liveness` already derives live / stalled / abandoned from a pid beside a
 transcript mtime and is the obvious source of truth — but it may never act on what it finds, by
 design, so the repair is a decision about who is allowed to reconcile a row with a measurement, not
 a line in a projection.
+
+---
+
+### F-25 — `sprout run --worktree` writes into the target repository and nothing ignores it
+
+**Status: OPEN.** Found by P4-03, which built the mechanism. Observed in **this** repository:
+`git check-ignore -v .worktrees` exits 1 with no output, the top-level `.gitignore` contains only
+`.claude/handoff/`, and `.git/info/exclude` is empty of rules.
+
+`Worktrees` puts every worktree at `<repository root>/.worktrees/sprout-<node>`, inside the
+repository on purpose — a child session runs under a write guard that treats everything outside its
+project directory as read-only, so a sibling directory would deny the child's first edit, and
+showrunner puts its own worktrees in the same place for the same reason.
+
+The consequence is that a `sprout run --worktree` against a repository that does not already ignore
+`.worktrees/` leaves `?? .worktrees/` in the **main checkout's** `git status` for as long as the
+worktree exists. That is untidy on its own, and it is a trap for the thing sprout is about to grow:
+the moment anything asks whether the main checkout is clean — a parent session's own teardown, an
+integration check, a human deciding whether to commit — sprout's own scratch directory is what
+makes the answer no. The failure is silent in the direction that matters, because "dirty" reads as
+"there is work here" and the work is sprout's.
+
+Two things it is **not**. It is not a nesting hazard: `Worktrees.repositoryRootOf` resolves through
+`--git-common-dir`, so a worktree created from inside another worktree lands beside it under the
+main root rather than inside it, and `sproutd/test/worktree_test.dart` asserts that. And it is not
+a bug in the teardown: a worktree's own tree never contains `.worktrees/`, so the cleanliness check
+that decides whether to remove one is unaffected.
+
+The repair is not obviously sprout's to make unilaterally — writing to a user's `.gitignore` is a
+tracked-file edit sprout was not asked for, and `.git/info/exclude` is per-clone and invisible in
+review. The honest options are to append to `.git/info/exclude` on first use and say so, or to
+refuse `--worktree` with a message naming the line to add, or to make the worktree root
+configurable and let the caller put it somewhere already ignored. That is a decision, so it is
+recorded here rather than taken inside a leaf that owns the mechanism and not the policy.
 
 ---
 

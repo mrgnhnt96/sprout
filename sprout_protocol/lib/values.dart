@@ -23,6 +23,12 @@
 /// precedent, because parsing what an external producer sends is the daemon's
 /// job and only the kinds cross sprout's own wire.
 ///
+/// The `worktree.*` kinds are P4-03's, and are here for the third time over
+/// the same argument. They record what sprout did to the git worktree a child
+/// session runs in — created, torn down, or *kept* because tearing it down
+/// would have destroyed work — and a board branching on them reads them off the
+/// same socket as everything else.
+///
 /// Implementation lives under `lib/src/values/`.
 library;
 
@@ -52,5 +58,9 @@ export 'src/values/kinds.dart'
         runnerLaunchFailedKind,
         runnerRefusedKind,
         runnerSessionKind,
-        runnerSpawnedKind;
+        runnerSpawnedKind,
+        worktreeCreatedKind,
+        worktreeKeptKind,
+        worktreeKindPrefix,
+        worktreeRemovedKind;
 export 'src/values/node.dart' show NodeStatus, SproutNode, TreeNode;

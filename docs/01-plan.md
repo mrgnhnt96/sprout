@@ -371,6 +371,29 @@ start-time-verified pid, every quiet exit logged with a `why`.
 
 **Phase 7 — steer.** NDJSON into a live session; propagate to affected children.
 
+**Phase 8 — hook ingest. THE SECOND OBSERVATION PATH.** Not in the original build order, and ranked
+above Phases 4/5/7 because of what §4 already said and nothing had acted on: stream-json covers only
+sessions sprout *launched and owns the pipe for*, so the session a developer starts by hand in a
+terminal — the main case — was invisible, and so was any watchdog over it. Phase 0 captured the hook
+payloads; until now nothing consumed them.
+
+The path is a machine-wide hook config running `sprout hook`, one OS process per hook event, which
+appends the bytes to a raw log and folds the payload into the **same SQLite store** the daemon
+already serves. No new transport: the daemon's existing 250 ms feed poll picks up another process's
+writes, so a foreign session appears live on the board and its history survives a daemon that was
+not running when it happened.
+
+Three properties are load-bearing and each has a mechanism rather than a preference behind them: the
+verb **always exits 0** (a non-zero exit from `PreToolUse` denies the tool call and exit 2 from
+`Stop` traps the session in a loop — §7 of `17`), it **never writes to stdout** (stdout is an input
+channel: a `UserPromptSubmit` hook's stdout is added to the conversation), and it is **bounded in
+time**, because every hook invocation blocks the session that fired it.
+
+Nodes are `hook/<session_id>` and `hook/<session_id>/<agent_id>`, a namespace that cannot collide
+with the runner's. A subagent gets no parent until the spawning `PostToolUse` returns — which in one
+Phase 0 capture is 4.3 s *after* the child finished, and in another arrives *before* the child's own
+`SubagentStart` — so an unclaimed child is a detached fragment rather than a guess.
+
 ---
 
 ## 12. Risks

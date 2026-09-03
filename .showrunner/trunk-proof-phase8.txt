@@ -1,0 +1,119 @@
+PHASE 8 BASELINE — what sprout sees of a session it did not spawn, BEFORE hook ingest
+=====================================================================================
+
+Binary under test : built from trunk dc7ce7d ("docs: Phase 6 proved on trunk"), the commit
+                    this phase starts from. 8,621,936 bytes.
+                    Pipeline: dart pub get; dart run revali build; dart compile exe.
+Method            : a REAL Claude Code session, started by hand the way a developer starts
+                    one — sprout did not launch it and owns no pipe to it — run to completion
+                    in its own directory, with SPROUT_DB pointed at a fresh database.
+
+1. THERE IS NO INGEST VERB TO REGISTER
+
+   $ sprout --help
+     run        Spawn one claude -p session at depth 0 and stream its events to disk.
+     snapshot   Print the whole tree at one cursor: ...
+     ui         Start the daemon and print the URL the board is at. ...
+     watch      Stream deltas against a snapshot: ...
+
+   $ sprout hook < /dev/null
+   Could not find a command named "hook".
+   exit=64
+
+   Note the exit code. 64 from a PreToolUse hook is a DENIED TOOL CALL, and 2 from a Stop
+   hook traps the session in a loop with the hook's stderr injected into the conversation
+   (17-observed-schemas.md §7). Registering today's binary as a hook would not merely fail
+   to observe — it would break the session it was pointed at.
+
+2. THE SESSION RAN, AND SPROUT SAW NOTHING
+
+   $ claude -p "reply with the single word BASELINE" --output-format stream-json --verbose
+   session_id 981fb54e-f3f5-419b-acc3-9c6e9d5d24a5
+   result     BASELINE
+   cost       $0.19722
+   exit=0
+
+   $ SPROUT_DB=<fresh> sprout snapshot
+   cursor s1.1bca0197c52f7b41.0
+   no nodes
+   holds nothing
+   journal readable
+
+   A whole session lived and died. The tree is empty, and the daemon is not at fault: there
+   is no path by which a session sprout did not spawn can reach the store at all. sprout
+   sees only what it launched and parses the stream-json of.
+
+This is the "before" the phase is measured against. Artifacts:
+  session.ndjson      the full stream of the unobserved session
+  snapshot-after.txt  the empty tree, captured after it finished
+Phase 8 — the ingest half, against the COMPILED binary, on a session sprout did not spawn
+=========================================================================================
+Binary: trunk 391b691 (P8-01+P8-02+P8-03 merged). 8,704,016 bytes — 82,080 more than the
+baseline at dc7ce7d. Same pipeline: pub get; revali build; dart compile exe.
+
+1. THE VERBS EXIST NOW
+
+   hook       Fold one Claude Code hook payload, read as JSON on stdin, into the store.
+              Always exits 0 and never writes to stdout.
+   hooks      Manage the Claude Code settings that register `sprout hook`.
+
+   $ sprout hooks install --command "<binary> hook"
+   ...eleven events, {"type":"command","command":"<binary> hook","timeout":10},
+   "matcher":"*" on PreToolUse/PostToolUse.  Printed, nothing written.
+   On stderr, and nowhere else:
+     sprout: merge the block above into ~/.claude/settings.json to register sprout
+     for every session on this machine.
+
+2. A REAL SESSION, STARTED BY HAND, WITH A REAL SUBAGENT
+
+   $ claude -p "Use the Task tool to launch exactly one subagent ... reply CHILD.
+                Then reply with the single word ROOT."
+       --settings <the block above> --permission-mode bypassPermissions
+   exit=0
+
+   sprout owns no pipe to that process. It was not launched by `sprout run`. The only
+   thing connecting them is the hook block.
+
+3. IT IS ON THE BOARD
+
+   $ sprout snapshot
+   cursor s1.5032866865c76fe7.14
+   checkpointed · hook/4cf59fc2-bd5b-464b-939c-46774e4ae408 · Use the Task tool to launch
+     exactly one subagent with subagent_type general-purpose whose prompt is: reply with
+     the single word CHILD. Then reply with the single word ROOT. · since 23:48Z (0m)
+     · next NONE SCHEDULED · spend ?
+     checkpointed · hook/4cf59fc2-…/a4c468a39865c2ede · general-purpose · since 23:48Z (0m)
+       · next NONE SCHEDULED · spend ?
+   holds nothing
+   journal readable
+
+   Two nodes, correctly parented. The root's task is the developer's own prompt. The child
+   is the subagent, found by `agent_id` and attached by the PostToolUse join — the parent
+   link that does not exist until the spawning tool call returns.
+
+   Compare BASELINE.txt, same probe, previous commit: "no nodes / holds nothing".
+
+4. WHAT THE STORE HOLDS
+
+   1  hook.SessionStart        1  hook.PreToolUse       2  runner.observed
+   1  hook.UserPromptSubmit    1  hook.PostToolUse      4  runner.updated
+   1  hook.SubagentStart       1  hook.Stop
+   1  hook.SubagentStop        1  hook.SessionEnd
+
+   node  hook/4cf59fc2-…                     parent NULL          checkpointed
+   node  hook/4cf59fc2-…/a4c468a39865c2ede   parent hook/4cf59…   checkpointed
+
+   Every hook event is in the feed; the six runner.observed/updated are the store
+   announcing its own rows, so a consumer holding a snapshot plus deltas learns of both
+   nodes without taking a second snapshot.
+
+5. AND THE BYTES ARE DURABLE BEFORE ANY OF THAT
+
+   hooks.raw, beside the database, 24 lines = 8 records framed header/payload/blank:
+
+     sprout-hook 2026-09-02T23:48:45.743037Z 469
+     {"session_id":"4cf59fc2-…","transcript_path":"…","cwd":"…",
+      "hook_event_name":"SessionStart","source":"startup"}
+
+   Written before anything parses them (F-15's repair), so a payload the store cannot take
+   — one with no session_id, or bytes that are not JSON — is still on disk.

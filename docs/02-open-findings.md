@@ -207,6 +207,32 @@ rule that already exists. A comment that understates coverage is read as permiss
 **Why it was not fixed here.** F-12 touched this package's `lib/`, not its `pubspec.yaml`, and the
 correction is a prose edit with no test that can hold it.
 
+### F-22 — `showrunner integrate` re-runs only sproutd's three checks, whatever the change touched
+
+**Status: OPEN, and the fix is Morgan's** — `.showrunner/config.json` is harness config and is not
+sprout's to edit. Observed this session while integrating F-12, P8-01 and P8-04, each of which
+changed `sprout_protocol/`.
+
+`.game_loop/verify.yaml` gives `sprout_protocol/**` four commands, on the reasoning its own comment
+gives: `dart analyze` covers the package it runs in and **not its path dependencies**, so the
+package needs its own analyze plus **both** consumers' suites, and `sprout_ui`'s is the only check
+that catches a web-unsafe change — `build_web_compilers` reports that failure as a WARNING and exits
+0, which is what F-07 was.
+
+`.showrunner/config.json`'s `checks` are three commands, all `cd sproutd && …`. So the checks
+re-run on the MERGED result — the ones that make "branch-green is not trunk-green" mean something —
+**never run `cd sprout_ui && dart test` or `cd sprout_protocol && dart analyze`**, however much of
+the protocol a merge changed. A web-unsafe change to `sprout_protocol` would integrate green.
+
+What held the line instead: each Crawler was told in its brief to run the four commands its change
+owed, and each did, in its own worktree. That is a habit rather than a gate, and it is exactly the
+"a pass that is silence proves nothing on its own" shape (INV8). Integration is where it should be
+enforced, because that is the only place the merged result exists.
+
+**The repair** is to add the two missing commands to `.showrunner/config.json`'s `checks`. The cost
+is that every integration then runs a jaspr build; the alternative is per-path checks, which
+showrunner's config does not appear to express.
+
 ---
 
 ## Notes that are not findings
